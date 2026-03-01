@@ -1,0 +1,19 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payflow
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: payflow
+  template:
+    metadata:
+      labels:
+        app: payflow
+    spec:
+      containers:
+        - name: payflow
+          image: payflow:latest
+          ports:
+            - containerPort: 8080
