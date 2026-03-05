@@ -16,5 +16,6 @@ func main() {
 	fmt.Println(message)
 
 	learn.Functions()
+	learn.StartHTTPServer()
 
 }
