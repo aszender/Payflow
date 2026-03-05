@@ -2,24 +2,133 @@ package domain
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
-type TransactionStatus struct{
-	Pending   string `json:"pending"`
-	Completed string `json:"completed"`
-	Failed    string `json:"failed"`
+// --- Transaction Status ---
+
+type TransactionStatus string
+
+const (
+	TxStatusPending    TransactionStatus = "PENDING"
+	TxStatusProcessing TransactionStatus = "PROCESSING"
+	TxStatusCompleted  TransactionStatus = "COMPLETED"
+	TxStatusFailed     TransactionStatus = "FAILED"
+	TxStatusRefunded   TransactionStatus = "REFUNDED"
+)
+
+// ValidTransitions defines the state machine for transaction lifecycle.
+// Each key maps to the set of states it can transition to.
+var ValidTransitions = map[TransactionStatus][]TransactionStatus{
+	TxStatusPending:    {TxStatusProcessing},
+	TxStatusProcessing: {TxStatusCompleted, TxStatusFailed},
+	TxStatusCompleted:  {TxStatusRefunded},
+	TxStatusFailed:     {},
+	TxStatusRefunded:   {},
 }
 
+// CanTransition checks if a transition from one status to another is valid.
+func CanTransition(from, to TransactionStatus) bool {
+	allowed, exists := ValidTransitions[from]
+	if !exists {
+		return false
+	}
+	for _, s := range allowed {
+		if s == to {
+			return true
+		}
+	}
+	return false
+}
+
+// IsTerminal returns true if the status is a final state.
+func (s TransactionStatus) IsTerminal() bool {
+	return s == TxStatusFailed || s == TxStatusRefunded
+}
+
+// --- Transaction ---
+
 type Transaction struct {
-    ID             string            `json:"id"`
-    MerchantID     string            `json:"merchant_id"`
-    Amount         float64           `json:"amount"`
-    Currency       string            `json:"currency"`
-    Status         TransactionStatus `json:"status"`
-    IdempotencyKey string            `json:"idempotency_key,omitempty"`
-    Description    string            `json:"description,omitempty"`
-    Metadata       json.RawMessage   `json:"metadata,omitempty"`
-    CreatedAt      time.Time         `json:"created_at"`
-    UpdatedAt      time.Time         `json:"updated_at"`
+	ID             string            `json:"id"`
+	MerchantID     string            `json:"merchant_id"`
+	Amount         float64           `json:"amount"`
+	Currency       string            `json:"currency"`
+	Status         TransactionStatus `json:"status"`
+	IdempotencyKey string            `json:"idempotency_key,omitempty"`
+	Description    string            `json:"description,omitempty"`
+	Metadata       json.RawMessage   `json:"metadata,omitempty"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+// --- Merchant ---
+
+type MerchantStatus string
+
+const (
+	MerchantActive   MerchantStatus = "ACTIVE"
+	MerchantInactive MerchantStatus = "INACTIVE"
+	MerchantSuspend  MerchantStatus = "SUSPENDED"
+)
+
+type Merchant struct {
+	ID        string         `json:"id"`
+	Name      string         `json:"name"`
+	APIKey    string         `json:"-"` // never expose in JSON responses
+	Balance   float64        `json:"balance"`
+	Currency  string         `json:"currency"`
+	Status    MerchantStatus `json:"status"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+func (m *Merchant) IsActive() bool {
+	return m.Status == MerchantActive
+}
+
+// --- Transaction Event (Audit Trail) ---
+
+type TransactionEvent struct {
+	ID            int64           `json:"id"`
+	TransactionID string          `json:"transaction_id"`
+	EventType     string          `json:"event_type"`
+	FromStatus    string          `json:"from_status,omitempty"`
+	ToStatus      string          `json:"to_status,omitempty"`
+	Payload       json.RawMessage `json:"payload,omitempty"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
+// --- Outbox Event (Reliable Event Publishing) ---
+
+type OutboxEvent struct {
+	ID        int64           `json:"id"`
+	EventType string          `json:"event_type"`
+	Payload   json.RawMessage `json:"payload"`
+	Published bool            `json:"published"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+// --- Pagination ---
+
+type ListParams struct {
+	Limit  int
+	Offset int
+}
+
+func NewListParams(limit, offset int) ListParams {
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	return ListParams{Limit: limit, Offset: offset}
+}
+
+// --- String representations ---
+
+func (t *Transaction) String() string {
+	return fmt.Sprintf("Transaction{id=%s, merchant=%s, amount=%.2f %s, status=%s}",
+		t.ID, t.MerchantID, t.Amount, t.Currency, t.Status)
 }

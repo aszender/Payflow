@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"github.com/aszender/payflow/functions"
+	"github.com/aszender/payflow/learn"
 )
 
 func main() {
@@ -15,6 +15,6 @@ func main() {
 	message = fmt.Sprintf("I am name %d years old and I live in %s.", age, city)
 	fmt.Println(message)
 
-	functions.Functions()
+	learn.Functions()
 
 }
