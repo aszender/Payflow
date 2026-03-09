@@ -33,4 +33,3 @@ var (
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrForbidden    = errors.New("forbidden")
 )
-//A sentinel error is a predefined error value used as a constant signal.

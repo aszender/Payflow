@@ -1,8 +1,51 @@
 package repository
 
-import "context"
+import (
+	"context"
+	"database/sql"
 
-type PaymentRepository interface {
-	Create(ctx context.Context, p interface{}) error
-	GetByID(ctx context.Context, id string) (interface{}, error)
+	"github.com/aszender/payflow/internal/domain"
+)
+
+type DBTX interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
+}
+
+
+type MerchantRepository interface {
+	GetByID(ctx context.Context, id string) (*domain.Merchant, error)
+	GetByAPIKey(ctx context.Context, apiKey string) (*domain.Merchant, error)
+	UpdateBalance(ctx context.Context, id string, delta float64) error
+
+	
+	WithTx(tx *sql.Tx) MerchantRepository
+}
+
+
+type TransactionRepository interface {
+	Create(ctx context.Context, tx *domain.Transaction) error
+	GetByID(ctx context.Context, id string) (*domain.Transaction, error)
+	GetByIdempotencyKey(ctx context.Context, key string) (*domain.Transaction, error)
+	UpdateStatus(ctx context.Context, id string, status domain.TransactionStatus) error
+	ListByMerchant(ctx context.Context, merchantID string, params domain.ListParams) ([]*domain.Transaction, int, error)
+
+	WithTx(tx *sql.Tx) TransactionRepository
+}
+
+
+type EventRepository interface {
+	Create(ctx context.Context, event *domain.TransactionEvent) error
+	ListByTransaction(ctx context.Context, txID string) ([]*domain.TransactionEvent, error)
+
+	WithTx(tx *sql.Tx) EventRepository
+}
+
+type OutboxRepository interface {
+	Create(ctx context.Context, event *domain.OutboxEvent) error
+	FetchUnpublished(ctx context.Context, limit int) ([]*domain.OutboxEvent, error)
+	MarkPublished(ctx context.Context, id int64) error
+
+	WithTx(tx *sql.Tx) OutboxRepository
 }
