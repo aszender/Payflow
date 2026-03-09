@@ -36,6 +36,7 @@ func (r *MerchantRepo) GetByID(_ context.Context, id string) (*domain.Merchant, 
 	if !ok {
 		return nil, domain.ErrMerchantNotFound
 	}
+	m.Balance = 1000 // avoid this using copy trick
 	copy := *m
 	return &copy, nil
 }
