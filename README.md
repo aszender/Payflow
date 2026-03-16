@@ -226,6 +226,15 @@ go test -v ./internal/handler/
 
 Most tests run without Docker or PostgreSQL. PostgreSQL integration tests run when `TEST_DATABASE_URL` is set and are also wired into CI. The test suite covers service flows, validation errors, idempotency, refunds, balance tracking, state transitions, circuit breaker behavior, handler behavior, and repository integration paths.
 
+## CI
+
+GitHub Actions runs the automated validation pipeline on every push and pull request:
+
+- `go test ./...`
+- `go test -race ./...`
+- PostgreSQL-backed integration tests
+- Docker image build verification
+
 ## Key Patterns Implemented
 
 ### DBTX Interface
