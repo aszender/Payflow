@@ -16,10 +16,6 @@ import (
 	"github.com/aszender/payflow/internal/service"
 )
 
-// ============================================================
-// Response Helpers
-// ============================================================
-
 type APIResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
@@ -59,7 +55,6 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	})
 }
 
-// mapDomainError maps domain errors to HTTP status codes.
 func mapDomainError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, domain.ErrMerchantNotFound):
@@ -89,10 +84,6 @@ func mapDomainError(w http.ResponseWriter, err error) {
 	}
 }
 
-// ============================================================
-// Transaction Handler
-// ============================================================
-
 type TransactionHandler struct {
 	svc *service.PaymentService
 }
@@ -101,7 +92,6 @@ func NewTransactionHandler(svc *service.PaymentService) *TransactionHandler {
 	return &TransactionHandler{svc: svc}
 }
 
-// POST /api/v1/transactions
 func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		MerchantID  string  `json:"merchant_id"`
@@ -114,7 +104,6 @@ func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validation
 	if req.MerchantID == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "merchant_id is required")
 		return
@@ -144,7 +133,6 @@ func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, tx)
 }
 
-// GET /api/v1/transactions/{id}
 func (h *TransactionHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	txID := chi.URLParam(r, "id")
 
@@ -157,14 +145,13 @@ func (h *TransactionHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tx)
 }
 
-// POST /api/v1/transactions/{id}/refund
 func (h *TransactionHandler) Refund(w http.ResponseWriter, r *http.Request) {
 	txID := chi.URLParam(r, "id")
 
 	var req struct {
 		Reason string `json:"reason"`
 	}
-	json.NewDecoder(r.Body).Decode(&req) // reason is optional
+	json.NewDecoder(r.Body).Decode(&req)
 
 	tx, err := h.svc.RefundTransaction(r.Context(), txID, req.Reason)
 	if err != nil {
@@ -175,7 +162,6 @@ func (h *TransactionHandler) Refund(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, tx)
 }
 
-// GET /api/v1/transactions/{id}/events
 func (h *TransactionHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	txID := chi.URLParam(r, "id")
 
@@ -188,7 +174,6 @@ func (h *TransactionHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, events)
 }
 
-// GET /api/v1/merchants/{id}/transactions
 func (h *TransactionHandler) ListByMerchant(w http.ResponseWriter, r *http.Request) {
 	merchantID := chi.URLParam(r, "id")
 
@@ -207,10 +192,6 @@ func (h *TransactionHandler) ListByMerchant(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// ============================================================
-// Merchant Handler
-// ============================================================
-
 type MerchantHandler struct {
 	svc *service.PaymentService
 }
@@ -219,7 +200,6 @@ func NewMerchantHandler(svc *service.PaymentService) *MerchantHandler {
 	return &MerchantHandler{svc: svc}
 }
 
-// GET /api/v1/merchants/{id}/balance
 func (h *MerchantHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	merchantID := chi.URLParam(r, "id")
 
@@ -236,10 +216,6 @@ func (h *MerchantHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 		"currency":    merchant.Currency,
 	})
 }
-
-// ============================================================
-// Health Handler
-// ============================================================
 
 type healthChecker interface {
 	HealthCheck(context.Context) error
@@ -283,10 +259,6 @@ func (h *HealthHandler) Check(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ============================================================
-// Metrics Handler
-// ============================================================
-
 type metricsSnapshotter interface {
 	GetSnapshot() metrics.Snapshot
 }
@@ -309,10 +281,6 @@ func (h *MetricsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(h.m.GetSnapshot())
 }
 
-// ============================================================
-// Router Setup
-// ============================================================
-
 func SetupRoutes(
 	r *chi.Mux,
 	txHandler *TransactionHandler,
@@ -323,7 +291,6 @@ func SetupRoutes(
 		GetByAPIKey(ctx interface{}, key string) (interface{}, error)
 	},
 ) {
-	// API v1 — authenticated
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Route("/transactions", func(r chi.Router) {
 			r.Post("/", txHandler.Create)

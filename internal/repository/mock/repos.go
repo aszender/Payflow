@@ -9,10 +9,6 @@ import (
 	"github.com/aszender/payflow/internal/repository"
 )
 
-// ============================================================
-// Mock Merchant Repository
-// ============================================================
-
 type MerchantRepo struct {
 	mu        sync.RWMutex
 	Merchants map[string]*domain.Merchant
@@ -66,14 +62,10 @@ func (r *MerchantRepo) UpdateBalance(_ context.Context, id string, delta float64
 	return nil
 }
 
-// ============================================================
-// Mock Transaction Repository
-// ============================================================
-
 type TransactionRepo struct {
 	mu           sync.RWMutex
 	Transactions map[string]*domain.Transaction
-	order        []string // preserve insertion order
+	order        []string
 }
 
 func NewTransactionRepo() *TransactionRepo {
@@ -132,7 +124,6 @@ func (r *TransactionRepo) ListByMerchant(_ context.Context, merchantID string, p
 	defer r.mu.RUnlock()
 
 	var filtered []*domain.Transaction
-	// Iterate in reverse order (newest first)
 	for i := len(r.order) - 1; i >= 0; i-- {
 		t := r.Transactions[r.order[i]]
 		if t.MerchantID == merchantID {
@@ -152,10 +143,6 @@ func (r *TransactionRepo) ListByMerchant(_ context.Context, merchantID string, p
 	}
 	return filtered[start:end], total, nil
 }
-
-// ============================================================
-// Mock Event Repository
-// ============================================================
 
 type EventRepo struct {
 	mu     sync.RWMutex
@@ -188,10 +175,6 @@ func (r *EventRepo) ListByTransaction(_ context.Context, txID string) ([]*domain
 	}
 	return result, nil
 }
-
-// ============================================================
-// Mock Outbox Repository
-// ============================================================
 
 type OutboxRepo struct {
 	mu     sync.RWMutex

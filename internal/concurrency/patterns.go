@@ -1,10 +1,5 @@
 package concurrency
 
-// This file contains the concurrency exercises from Guide 3.
-// Study these patterns, then delete this file and rewrite from memory.
-//
-// Run: go test -v -race ./internal/concurrency/
-
 import (
 	"context"
 	"fmt"
@@ -12,10 +7,6 @@ import (
 	"sync"
 	"time"
 )
-
-// ============================================================
-// WORKER POOL — Controlled concurrency with backpressure
-// ============================================================
 
 type WorkerPool struct {
 	jobs    chan func()
@@ -44,7 +35,6 @@ func (wp *WorkerPool) worker(id int) {
 	}
 }
 
-// Submit adds a job to the pool. Returns error if queue is full.
 func (wp *WorkerPool) Submit(job func()) error {
 	wp.mu.Lock()
 	defer wp.mu.Unlock()
@@ -61,7 +51,6 @@ func (wp *WorkerPool) Submit(job func()) error {
 	}
 }
 
-// Shutdown waits for all jobs to complete.
 func (wp *WorkerPool) Shutdown() {
 	wp.mu.Lock()
 	if !wp.closed {
@@ -72,12 +61,6 @@ func (wp *WorkerPool) Shutdown() {
 
 	wp.wg.Wait()
 }
-
-// ============================================================
-// VERIFICATION PIPELINE — Parallel checks with shared timeout
-// ============================================================
-// Simulates: fraud check + sanctions check + bank verification
-// All run in parallel, all must pass, shared 2-second timeout.
 
 type VerificationResult struct {
 	Check   string
@@ -117,13 +100,11 @@ func VerifyTransaction(ctx context.Context, txID string, amount float64) ([]Veri
 		}(check.name, check.fn)
 	}
 
-	// Close channel when all goroutines finish
 	go func() {
 		wg.Wait()
 		close(resultCh)
 	}()
 
-	// Collect results
 	var results []VerificationResult
 	for r := range resultCh {
 		results = append(results, r)
@@ -132,7 +113,6 @@ func VerifyTransaction(ctx context.Context, txID string, amount float64) ([]Veri
 		}
 	}
 
-	// Check if all passed
 	for _, r := range results {
 		if !r.Passed {
 			return results, fmt.Errorf("verification failed: %s: %v", r.Check, r.Error)
@@ -141,7 +121,6 @@ func VerifyTransaction(ctx context.Context, txID string, amount float64) ([]Veri
 	return results, nil
 }
 
-// Simulated checks — replace with real API calls in production
 func checkFraud(ctx context.Context, txID string, amount float64) error {
 	select {
 	case <-time.After(time.Duration(50+rand.Intn(100)) * time.Millisecond):
@@ -157,7 +136,7 @@ func checkFraud(ctx context.Context, txID string, amount float64) error {
 func checkSanctions(ctx context.Context, txID string, amount float64) error {
 	select {
 	case <-time.After(time.Duration(30+rand.Intn(80)) * time.Millisecond):
-		return nil // not sanctioned
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -166,15 +145,11 @@ func checkSanctions(ctx context.Context, txID string, amount float64) error {
 func checkBank(ctx context.Context, txID string, amount float64) error {
 	select {
 	case <-time.After(time.Duration(100+rand.Intn(200)) * time.Millisecond):
-		return nil // bank approved
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
-
-// ============================================================
-// FAN-OUT / FAN-IN — Process items concurrently, collect results
-// ============================================================
 
 type ProcessResult struct {
 	ID     string
@@ -184,17 +159,16 @@ type ProcessResult struct {
 
 func ProcessConcurrently(ctx context.Context, ids []string, concurrency int) []ProcessResult {
 	results := make([]ProcessResult, len(ids))
-	sem := make(chan struct{}, concurrency) // semaphore limits concurrency
+	sem := make(chan struct{}, concurrency)
 	var wg sync.WaitGroup
 
 	for i, id := range ids {
 		wg.Add(1)
-		sem <- struct{}{} // acquire slot (blocks if full)
+		sem <- struct{}{}
 		go func(idx int, itemID string) {
 			defer wg.Done()
-			defer func() { <-sem }() // release slot
+			defer func() { <-sem }()
 
-			// Check context before doing work
 			select {
 			case <-ctx.Done():
 				results[idx] = ProcessResult{ID: itemID, Error: ctx.Err()}
@@ -202,7 +176,6 @@ func ProcessConcurrently(ctx context.Context, ids []string, concurrency int) []P
 			default:
 			}
 
-			// Simulate work
 			time.Sleep(time.Duration(50+rand.Intn(100)) * time.Millisecond)
 			results[idx] = ProcessResult{
 				ID:     itemID,
@@ -215,15 +188,11 @@ func ProcessConcurrently(ctx context.Context, ids []string, concurrency int) []P
 	return results
 }
 
-// ============================================================
-// RATE LIMITER — Token bucket (from Guide 6, but the concept is Day 3)
-// ============================================================
-
 type TokenBucket struct {
 	mu        sync.Mutex
 	tokens    float64
 	maxTokens float64
-	rate      float64 // tokens per second
+	rate      float64
 	lastCheck time.Time
 }
 
@@ -255,10 +224,6 @@ func (tb *TokenBucket) Allow() bool {
 	return true
 }
 
-// ============================================================
-// SAFE COUNTER — Using sync.RWMutex (read-heavy workload)
-// ============================================================
-
 type SafeMetrics struct {
 	mu     sync.RWMutex
 	counts map[string]int64
@@ -275,7 +240,7 @@ func (m *SafeMetrics) Increment(key string) {
 }
 
 func (m *SafeMetrics) Get(key string) int64 {
-	m.mu.RLock() // read lock — allows concurrent readers
+	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.counts[key]
 }

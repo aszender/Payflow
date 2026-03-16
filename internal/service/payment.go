@@ -12,14 +12,8 @@ import (
 	"time"
 
 	"github.com/aszender/payflow/internal/domain"
-	//"github.com/aszender/payflow/internal/middleware"
 	"github.com/aszender/payflow/internal/repository"
-	//"github.com/google/uuid"
 )
-
-// PaymentService contains all business logic for processing payments.
-// It orchestrates repositories, enforces the state machine, and ensures
-// data consistency through database transactions.
 
 type PaymentService struct {
 	db             *sql.DB
@@ -97,8 +91,6 @@ func NewPaymentService(cfg PaymentServiceConfig) *PaymentService {
 	}
 }
 
-// --- Create Transaction ---
-
 type CreateTransactionInput struct {
 	MerchantID     string
 	Amount         float64
@@ -109,12 +101,10 @@ type CreateTransactionInput struct {
 
 func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTransactionInput) (*domain.Transaction, error) {
 	log := s.logger.With(
-		//"request_id", middleware.GetRequestID(ctx),
 		"merchant_id", input.MerchantID,
 		"amount", input.Amount,
 	)
 
-	// 1. Idempotency check
 	if input.IdempotencyKey != "" {
 		existing, err := s.txns.GetByIdempotencyKey(ctx, input.IdempotencyKey)
 		if err != nil {
@@ -126,7 +116,6 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 		}
 	}
 
-	// 2. Validate merchant
 	merchant, err := s.merchants.GetByID(ctx, input.MerchantID)
 	if err != nil {
 		return nil, err
@@ -135,7 +124,6 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 		return nil, domain.ErrMerchantInactive
 	}
 
-	// 3. Validate amount
 	if input.Amount <= 0 {
 		return nil, domain.ErrInvalidAmount
 	}
@@ -143,12 +131,10 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 		return nil, domain.ErrAmountExceedsLimit
 	}
 
-	// 4. Validate currency
 	if input.Currency != "CAD" && input.Currency != "USD" {
 		return nil, domain.ErrInvalidCurrency
 	}
 
-	// 5. Create transaction record
 	now := time.Now()
 	tx := &domain.Transaction{
 		ID:             generateTransactionID(),
@@ -162,11 +148,9 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 		UpdatedAt:      now,
 	}
 
-	// 6. Save within DB transaction (atomic: insert tx + insert event)
 	if s.db != nil {
 		err = s.createInDBTransaction(ctx, tx)
 	} else {
-		// Mock mode (testing without real DB)
 		err = s.createWithMocks(ctx, tx)
 	}
 	if err != nil {
@@ -175,9 +159,7 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 
 	log.Info("transaction created", "tx_id", tx.ID)
 
-	// 7. Process payment (bank call)
 	if err := s.processPayment(ctx, tx, log); err != nil {
-		// Return the tx even on failure — client needs the ID to check status
 		return tx, nil
 	}
 
@@ -203,7 +185,6 @@ func (s *PaymentService) createInDBTransaction(ctx context.Context, tx *domain.T
 			return fmt.Errorf("save creation event: %w", err)
 		}
 
-		// Write to outbox for reliable event publishing
 		payload, _ := json.Marshal(map[string]interface{}{
 			"transaction_id": tx.ID,
 			"merchant_id":    tx.MerchantID,
@@ -236,32 +217,25 @@ func (s *PaymentService) createWithMocks(ctx context.Context, tx *domain.Transac
 	return nil
 }
 
-// --- Process Payment (Bank Interaction) ---
-
 func (s *PaymentService) processPayment(ctx context.Context, tx *domain.Transaction, log *slog.Logger) error {
-	// Transition: PENDING → PROCESSING
 	if err := s.transition(ctx, tx, domain.TxStatusProcessing); err != nil {
 		return err
 	}
 
-	// Call bank with timeout
 	bankCtx, cancel := context.WithTimeout(ctx, s.bankTimeout)
 	defer cancel()
 
 	err := s.callBank(bankCtx, tx)
 	if err != nil {
-		// Bank failed — mark FAILED
 		log.Warn("bank call failed", "tx_id", tx.ID, "error", err)
 		s.transition(ctx, tx, domain.TxStatusFailed)
 		return err
 	}
 
-	// Bank confirmed — mark COMPLETED
 	if err := s.transition(ctx, tx, domain.TxStatusCompleted); err != nil {
 		return err
 	}
 
-	// Credit merchant balance
 	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, tx.Amount); err != nil {
 		log.Error("failed to credit merchant", "tx_id", tx.ID, "error", err)
 		return err
@@ -287,11 +261,7 @@ func (s *PaymentService) callBank(ctx context.Context, tx *domain.Transaction) e
 	})
 }
 
-// --- Refund ---
-
 func (s *PaymentService) RefundTransaction(ctx context.Context, txID, reason string) (*domain.Transaction, error) {
-	//log := s.logger.With("request_id", middleware.GetRequestID(ctx), "tx_id", txID)
-
 	tx, err := s.txns.GetByID(ctx, txID)
 	if err != nil {
 		return nil, err
@@ -311,7 +281,6 @@ func (s *PaymentService) RefundTransaction(ctx context.Context, txID, reason str
 	}
 
 	tx.Status = domain.TxStatusRefunded
-	//log.Info("transaction refunded", "amount", tx.Amount)
 	return tx, nil
 }
 
@@ -374,8 +343,6 @@ func (s *PaymentService) refundWithMocks(ctx context.Context, tx *domain.Transac
 	})
 }
 
-// --- Read Operations ---
-
 func (s *PaymentService) GetTransaction(ctx context.Context, id string) (*domain.Transaction, error) {
 	return s.txns.GetByID(ctx, id)
 }
@@ -391,8 +358,6 @@ func (s *PaymentService) ListTransactions(ctx context.Context, merchantID string
 func (s *PaymentService) GetTransactionHistory(ctx context.Context, txID string) ([]*domain.TransactionEvent, error) {
 	return s.events.ListByTransaction(ctx, txID)
 }
-
-// --- State Machine ---
 
 func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction, to domain.TransactionStatus) error {
 	from := tx.Status
@@ -416,8 +381,6 @@ func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction,
 
 	return nil
 }
-
-// --- DB Transaction helper (duplicated here to avoid circular import) ---
 
 func withTransaction(ctx context.Context, db *sql.DB, fn func(tx *sql.Tx) error) error {
 	tx, err := db.BeginTx(ctx, nil)
