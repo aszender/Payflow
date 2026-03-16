@@ -2,8 +2,11 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -19,12 +22,15 @@ import (
 // data consistency through database transactions.
 
 type PaymentService struct {
-	db        *sql.DB
-	merchants repository.MerchantRepository
-	txns      repository.TransactionRepository
-	events    repository.EventRepository
-	outbox    repository.OutboxRepository
-	logger    *slog.Logger
+	db             *sql.DB
+	merchants      repository.MerchantRepository
+	txns           repository.TransactionRepository
+	events         repository.EventRepository
+	outbox         repository.OutboxRepository
+	logger         *slog.Logger
+	bank           BankClient
+	breaker        *CircuitBreaker
+	retry          RetryConfig
 	bankTimeout    time.Duration
 	maxTransaction float64
 }
@@ -36,18 +42,56 @@ type PaymentServiceConfig struct {
 	Events         repository.EventRepository
 	Outbox         repository.OutboxRepository
 	Logger         *slog.Logger
+	BankClient     BankClient
+	CircuitBreaker *CircuitBreaker
+	RetryConfig    RetryConfig
 	BankTimeout    time.Duration
 	MaxTransaction float64
 }
 
 func NewPaymentService(cfg PaymentServiceConfig) *PaymentService {
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+
+	bankClient := cfg.BankClient
+	if bankClient == nil {
+		bankClient = &SimulatedBankClient{Latency: 150 * time.Millisecond}
+	}
+
+	breaker := cfg.CircuitBreaker
+	if breaker == nil {
+		breaker = NewCircuitBreaker(3, 5*time.Second)
+	}
+
+	retryCfg := cfg.RetryConfig
+	if retryCfg.MaxAttempts <= 0 {
+		retryCfg.MaxAttempts = 3
+	}
+	if retryCfg.BaseDelay <= 0 {
+		retryCfg.BaseDelay = 100 * time.Millisecond
+	}
+	if retryCfg.MaxDelay <= 0 {
+		retryCfg.MaxDelay = time.Second
+	}
+	if retryCfg.Jitter <= 0 {
+		retryCfg.Jitter = 50 * time.Millisecond
+	}
+	if retryCfg.ShouldRetry == nil {
+		retryCfg.ShouldRetry = isRetryableBankError
+	}
+
 	return &PaymentService{
 		db:             cfg.DB,
 		merchants:      cfg.Merchants,
 		txns:           cfg.Transactions,
 		events:         cfg.Events,
 		outbox:         cfg.Outbox,
-		logger:         cfg.Logger,
+		logger:         logger,
+		bank:           bankClient,
+		breaker:        breaker,
+		retry:          retryCfg,
 		bankTimeout:    cfg.BankTimeout,
 		maxTransaction: cfg.MaxTransaction,
 	}
@@ -107,7 +151,7 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 	// 5. Create transaction record
 	now := time.Now()
 	tx := &domain.Transaction{
-		//ID:             "tx_" + uuid.New().String()[:8],
+		ID:             generateTransactionID(),
 		MerchantID:     input.MerchantID,
 		Amount:         input.Amount,
 		Currency:       input.Currency,
@@ -228,17 +272,19 @@ func (s *PaymentService) processPayment(ctx context.Context, tx *domain.Transact
 }
 
 func (s *PaymentService) callBank(ctx context.Context, tx *domain.Transaction) error {
-	// Simulated bank API call.
-	// In production: HTTP call to Interac / bank partner API.
-	select {
-	case <-time.After(150 * time.Millisecond): // simulate bank latency
-		if tx.Amount > s.maxTransaction {
-			return domain.ErrAmountExceedsLimit
-		}
-		return nil // approved
-	case <-ctx.Done():
-		return domain.ErrBankTimeout
+	req := BankChargeRequest{
+		TransactionID: tx.ID,
+		MerchantID:    tx.MerchantID,
+		Amount:        tx.Amount,
+		Currency:      tx.Currency,
 	}
+
+	return s.breaker.Execute(func() error {
+		return Retry(ctx, s.retry, func(ctx context.Context) error {
+			_, err := s.bank.Charge(ctx, req)
+			return err
+		})
+	})
 }
 
 // --- Refund ---
@@ -383,4 +429,18 @@ func withTransaction(ctx context.Context, db *sql.DB, fn func(tx *sql.Tx) error)
 		return err
 	}
 	return tx.Commit()
+}
+
+func generateTransactionID() string {
+	var buf [8]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return fmt.Sprintf("tx_%d", time.Now().UnixNano())
+	}
+	return "tx_" + hex.EncodeToString(buf[:])
+}
+
+func isRetryableBankError(err error) bool {
+	return errors.Is(err, domain.ErrBankTimeout) ||
+		errors.Is(err, domain.ErrBankUnavailable) ||
+		errors.Is(err, context.DeadlineExceeded)
 }

@@ -21,8 +21,8 @@ type MerchantRepo struct {
 func NewMerchantRepo() *MerchantRepo {
 	return &MerchantRepo{
 		Merchants: map[string]*domain.Merchant{
-			"m_001": {ID: "m_001", Name: "Maple Sports", APIKey: "sk_test_001", Balance: 0, Currency: "CAD", Status: domain.MerchantActive},
-			"m_002": {ID: "m_002", Name: "Northern Gaming", APIKey: "sk_test_002", Balance: 500, Currency: "CAD", Status: domain.MerchantActive},
+			"m_001": {ID: "m_001", Name: "Maple Sports", APIKey: "sk_live_maple_001", Balance: 0, Currency: "CAD", Status: domain.MerchantActive},
+			"m_002": {ID: "m_002", Name: "Northern Gaming", APIKey: "sk_live_northern_002", Balance: 500, Currency: "CAD", Status: domain.MerchantActive},
 		},
 	}
 }
@@ -36,7 +36,6 @@ func (r *MerchantRepo) GetByID(_ context.Context, id string) (*domain.Merchant, 
 	if !ok {
 		return nil, domain.ErrMerchantNotFound
 	}
-	m.Balance = 1000 // avoid this using copy trick
 	copy := *m
 	return &copy, nil
 }

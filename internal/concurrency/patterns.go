@@ -20,7 +20,9 @@ import (
 type WorkerPool struct {
 	jobs    chan func()
 	wg      sync.WaitGroup
+	mu      sync.Mutex
 	workers int
+	closed  bool
 }
 
 func NewWorkerPool(workers, queueSize int) *WorkerPool {
@@ -44,6 +46,13 @@ func (wp *WorkerPool) worker(id int) {
 
 // Submit adds a job to the pool. Returns error if queue is full.
 func (wp *WorkerPool) Submit(job func()) error {
+	wp.mu.Lock()
+	defer wp.mu.Unlock()
+
+	if wp.closed {
+		return fmt.Errorf("worker pool is shut down")
+	}
+
 	select {
 	case wp.jobs <- job:
 		return nil
@@ -54,7 +63,13 @@ func (wp *WorkerPool) Submit(job func()) error {
 
 // Shutdown waits for all jobs to complete.
 func (wp *WorkerPool) Shutdown() {
-	close(wp.jobs)
+	wp.mu.Lock()
+	if !wp.closed {
+		wp.closed = true
+		close(wp.jobs)
+	}
+	wp.mu.Unlock()
+
 	wp.wg.Wait()
 }
 
