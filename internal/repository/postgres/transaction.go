@@ -22,12 +22,17 @@ func (r *TransactionRepo) WithTx(tx *sql.Tx) repository.TransactionRepository {
 }
 
 func (r *TransactionRepo) Create(ctx context.Context, t *domain.Transaction) error {
+	metadata := t.Metadata
+	if len(metadata) == 0 {
+		metadata = []byte(`{}`)
+	}
+
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO transactions
 			(id, merchant_id, amount, currency, status, idempotency_key, description, metadata, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, NULLIF($6,''), NULLIF($7,''), $8, $9, $10)`,
 		t.ID, t.MerchantID, t.Amount, t.Currency, t.Status,
-		t.IdempotencyKey, t.Description, t.Metadata,
+		t.IdempotencyKey, t.Description, metadata,
 		t.CreatedAt, t.UpdatedAt,
 	)
 	if err != nil {
