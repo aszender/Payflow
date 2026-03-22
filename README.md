@@ -275,10 +275,6 @@ Things this project demonstrates vs. what a production system would add:
 | Manual SQL migrations executed at startup | golang-migrate or Atlas |
 | Basic K8s manifests included in repo | Fully hardened deployment specs and autoscaling |
 
-## License
-
-MIT
-
 ## API Examples
 
 POST `/payments`
@@ -350,6 +346,10 @@ It responds with HTTP `200` and is intended for readiness checks.
 
 ## API Contract
 
-The HTTP contract is documented in [`/api/openapi.yaml`](/Users/aszender/VSCProyects/Paramount-GO/api/openapi.yaml).
+The HTTP contract is documented in `api/openapi.yaml`.
 
 Use that file as the source of truth for endpoint paths, request bodies, and response shapes.
+
+## License
+
+MIT
