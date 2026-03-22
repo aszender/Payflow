@@ -10,6 +10,7 @@ import (
 
 type WorkerPool struct {
 	jobs    chan func()
+	slots   chan struct{}
 	wg      sync.WaitGroup
 	mu      sync.Mutex
 	workers int
@@ -19,6 +20,7 @@ type WorkerPool struct {
 func NewWorkerPool(workers, queueSize int) *WorkerPool {
 	wp := &WorkerPool{
 		jobs:    make(chan func(), queueSize),
+		slots:   make(chan struct{}, workers+queueSize),
 		workers: workers,
 	}
 	for i := 0; i < workers; i++ {
@@ -44,7 +46,11 @@ func (wp *WorkerPool) Submit(job func()) error {
 	}
 
 	select {
-	case wp.jobs <- job:
+	case wp.slots <- struct{}{}:
+		wp.jobs <- func() {
+			defer func() { <-wp.slots }()
+			job()
+		}
 		return nil
 	default:
 		return fmt.Errorf("worker pool queue full")
