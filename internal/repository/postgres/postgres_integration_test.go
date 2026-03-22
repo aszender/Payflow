@@ -51,7 +51,7 @@ func resetDatabase(t *testing.T, db *DB) {
 	}
 
 	_, err = db.ExecContext(ctx, `
-		INSERT INTO merchants (id, name, api_key, balance, currency, status)
+		INSERT INTO merchants (id, name, api_key, balance_cents, currency, status)
 		VALUES
 			('m_001', 'Maple Sports', 'sk_live_maple_001', 0, 'CAD', 'ACTIVE'),
 			('m_002', 'Northern Gaming', 'sk_live_northern_002', 50000, 'CAD', 'ACTIVE')
@@ -118,13 +118,13 @@ func TestEventRepo_CreateAndList(t *testing.T) {
 	eventRepo := NewEventRepo(db.DB)
 
 	tx := &domain.Transaction{
-		ID:         "tx_events_001",
-		MerchantID: "m_001",
+		ID:          "tx_events_001",
+		MerchantID:  "m_001",
 		AmountCents: 5000,
-		Currency:   "CAD",
-		Status:     domain.TxStatusPending,
-		CreatedAt:  time.Now().UTC(),
-		UpdatedAt:  time.Now().UTC(),
+		Currency:    "CAD",
+		Status:      domain.TxStatusPending,
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
 	}
 	if err := txRepo.Create(context.Background(), tx); err != nil {
 		t.Fatalf("create transaction: %v", err)
