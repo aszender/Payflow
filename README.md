@@ -145,7 +145,7 @@ payflow/
 │   └── concurrency/
 │       ├── patterns.go               ← worker pool, verification pipeline
 │       └── patterns_test.go          ← concurrency tests with -race
-├── migrations/                       ← 5 manual SQL migration files (idempotent, ordered)
+├── migrations/                       ← 6 manual SQL migration files (idempotent, ordered)
 ├── Dockerfile                        ← multi-stage container build
 ├── docker-compose.yml                ← PostgreSQL + Kafka + Zookeeper
 ├── Makefile
@@ -167,14 +167,15 @@ payflow/
 
 ### Example: Create a payment
 
+The authenticated merchant comes from the Bearer API key, so the request body does not include `merchant_id`.
+
 ```bash
 curl -X POST http://localhost:8080/api/v1/transactions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer sk_live_maple_001" \
   -H "X-Idempotency-Key: order_12345" \
   -d '{
-    "merchant_id": "m_001",
-    "amount": 150.00,
+    "amount_cents": 15000,
     "currency": "CAD"
   }'
 ```
@@ -185,7 +186,7 @@ curl -X POST http://localhost:8080/api/v1/transactions \
   "data": {
     "id": "tx_a1b2c3d4",
     "merchant_id": "m_001",
-    "amount": 150.00,
+    "amount_cents": 15000,
     "currency": "CAD",
     "status": "COMPLETED",
     "idempotency_key": "order_12345",
@@ -209,7 +210,8 @@ curl http://localhost:8080/health | jq
 curl -X POST http://localhost:8080/api/v1/transactions \
   -H "Authorization: Bearer sk_live_maple_001" \
   -H "Content-Type: application/json" \
-  -d '{"merchant_id":"m_001","amount":150,"currency":"CAD"}'
+  -H "X-Idempotency-Key: order_12345" \
+  -d '{"amount_cents":15000,"currency":"CAD"}'
 
 # Check merchant balance
 curl http://localhost:8080/api/v1/merchants/m_001/balance \
