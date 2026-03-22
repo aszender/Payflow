@@ -6,10 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/aszender/payflow/internal/metrics"
 	"github.com/aszender/payflow/internal/middleware"
@@ -47,7 +49,6 @@ func newHandlerTestSuite() *handlerTestSuite {
 	txHandler := NewTransactionHandler(svc)
 	merchantHandler := NewMerchantHandler(svc)
 	healthHandler := NewHealthHandler(nil, "test")
-	metricsHandler := NewMetricsHandler(appMetrics)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
@@ -58,7 +59,8 @@ func newHandlerTestSuite() *handlerTestSuite {
 	r.Use(middleware.RateLimit(middleware.NewRateLimiter(100, 100)))
 
 	r.Get("/health", healthHandler.Check)
-	r.Get("/metrics", metricsHandler.Get)
+	r.Get("/ready", healthHandler.Ready)
+	r.Get("/metrics", promhttp.Handler().ServeHTTP)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Use(middleware.APIKeyAuth(merchantRepo, logger))
@@ -95,6 +97,21 @@ func TestHealth_ReturnsOK(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestReady_ReturnsReady(t *testing.T) {
+	suite := newHandlerTestSuite()
+	req := httptest.NewRequest(http.MethodGet, "/ready", nil)
+	rec := httptest.NewRecorder()
+
+	suite.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if body := strings.TrimSpace(rec.Body.String()); body != `{"status":"ready"}` {
+		t.Fatalf("expected ready payload, got %s", body)
 	}
 }
 
@@ -227,7 +244,10 @@ func TestMetrics_ReturnsJSON(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
 	}
-	if rec.Header().Get("Content-Type") != "application/json" {
-		t.Fatalf("expected json content type, got %s", rec.Header().Get("Content-Type"))
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("expected prometheus content type, got %s", ct)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "go_gc_duration_seconds") {
+		t.Fatalf("expected default prometheus metrics in body, got %s", body)
 	}
 }

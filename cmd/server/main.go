@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/aszender/payflow/internal/config"
 	"github.com/aszender/payflow/internal/handler"
@@ -113,7 +114,6 @@ func main() {
 	txHandler := handler.NewTransactionHandler(paymentSvc)
 	merchantHandler := handler.NewMerchantHandler(paymentSvc)
 	healthHandler := handler.NewHealthHandler(db, version)
-	metricsHandler := handler.NewMetricsHandler(appMetrics)
 
 	// --- Rate Limiter ---
 	limiter := middleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst)
@@ -131,7 +131,8 @@ func main() {
 
 	// Public routes (no auth)
 	r.Get("/health", healthHandler.Check)
-	r.Get("/metrics", metricsHandler.Get)
+	r.Get("/ready", healthHandler.Ready)
+	r.Get("/metrics", promhttp.Handler().ServeHTTP)
 
 	// Authenticated API routes
 	r.Route("/api/v1", func(r chi.Router) {

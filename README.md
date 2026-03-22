@@ -278,3 +278,78 @@ Things this project demonstrates vs. what a production system would add:
 ## License
 
 MIT
+
+## API Examples
+
+POST `/payments`
+
+Request:
+
+```json
+{
+  "merchant_id": "m_123",
+  "amount": 100.50,
+  "currency": "USD"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "transaction_id": "tx_456",
+    "status": "approved"
+  }
+}
+```
+
+Error example:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "AMOUNT_EXCEEDS_LIMIT",
+    "message": "amount exceeds limit"
+  }
+}
+```
+
+## Environment Variables
+
+The repository includes a root-level `.env.example` file with safe placeholder values for local development. It documents the expected environment variables used by the application so you can create a private `.env` file without guessing the required keys.
+
+The example file includes:
+
+- `DB_HOST`
+- `DB_PORT`
+- `DB_USER`
+- `DB_PASSWORD`
+- `DB_NAME`
+- `PORT`
+
+## Metrics
+
+The API exposes a `GET /metrics` endpoint for Prometheus scraping. It uses the default Prometheus collector set and does not require custom application metrics to be enabled.
+
+This endpoint is intended for operational visibility during local development and production-style deployments.
+
+## Readiness
+
+The API exposes a `GET /ready` endpoint that returns:
+
+```json
+{
+  "status": "ready"
+}
+```
+
+It responds with HTTP `200` and is intended for readiness checks.
+
+## API Contract
+
+The HTTP contract is documented in [`/api/openapi.yaml`](/Users/aszender/VSCProyects/Paramount-GO/api/openapi.yaml).
+
+Use that file as the source of truth for endpoint paths, request bodies, and response shapes.
