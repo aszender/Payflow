@@ -36,6 +36,7 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.6
+          install-mode: goinstall
 
       - name: Install govulncheck
         run: go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
