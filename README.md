@@ -62,18 +62,6 @@ Designed to demonstrate production-oriented backend architecture: clean layering
 9. Downstream services receive notification (webhooks, analytics)
 ```
 
-## Design Decisions and Trade-offs
-
-| Decision | Chose | Over | Why |
-|----------|-------|------|-----|
-| Database | PostgreSQL | MongoDB | ACID transactions required for financial data. Money needs consistency, not eventual consistency |
-| ORM | `database/sql` | GORM | Full control over queries and transactions. ORMs hide SQL complexity that matters in payment systems |
-| Framework | chi | gin/echo | Lightweight, stdlib-compatible. `net/http` signatures, no vendor lock-in |
-| Architecture | Hexagonal | Layered MVC | Repository interfaces enable testing without DB. Swap PostgreSQL for another persistence layer without touching business logic |
-| Bank call | Sync + outbox | Fully async | Client gets immediate response. Outbox preserves downstream delivery intent even if Kafka is temporarily unavailable |
-| Testing | Mocks + integration tests | Testcontainers-only | Unit tests stay fast, and PostgreSQL integration tests run in CI |
-| Rate limiting | In-memory token bucket | Redis-based | Simpler for single instance. Production would use Redis for global enforcement across pods |
-
 ## Core Features
 
 **Transaction Processing**
@@ -103,6 +91,147 @@ Designed to demonstrate production-oriented backend architecture: clean layering
 Go 1.25 · chi · PostgreSQL 16 · Kafka · Docker · basic Kubernetes manifests
 
 Application metrics exposed via `/metrics` endpoint
+
+## Quick Start
+
+```bash
+# Clone and start
+git clone https://github.com/aszender/payflow.git
+cd payflow
+docker-compose up -d --build
+
+# Verify
+curl http://localhost:8080/health | jq
+
+# Create a payment
+curl -X POST http://localhost:8080/api/v1/transactions \
+  -H "Authorization: Bearer sk_live_maple_001" \
+  -H "Content-Type: application/json" \
+  -H "X-Idempotency-Key: order_12345" \
+  -d '{"amount_cents":15000,"currency":"CAD"}'
+
+# Check merchant balance
+curl http://localhost:8080/api/v1/merchants/m_001/balance \
+  -H "Authorization: Bearer sk_live_maple_001" | jq
+```
+
+## API
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| `GET` | `/health` | No | Liveness + readiness (DB ping) |
+| `GET` | `/metrics` | No | p50/p95/p99 latency, request counts |
+| `POST` | `/api/v1/transactions` | Bearer | Create payment |
+| `GET` | `/api/v1/transactions/{id}` | Bearer | Get transaction |
+| `POST` | `/api/v1/transactions/{id}/refund` | Bearer | Refund (atomic reverse) |
+| `GET` | `/api/v1/transactions/{id}/events` | Bearer | Audit trail |
+| `GET` | `/api/v1/merchants/{id}/balance` | Bearer | Merchant balance |
+| `GET` | `/api/v1/merchants/{id}/transactions` | Bearer | Paginated list |
+
+### Example: Create a payment
+
+The authenticated merchant comes from the Bearer API key, so the request body does not include `merchant_id`.
+
+```bash
+curl -X POST http://localhost:8080/api/v1/transactions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk_live_maple_001" \
+  -H "X-Idempotency-Key: order_12345" \
+  -d '{
+    "amount_cents": 15000,
+    "currency": "CAD"
+  }'
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "tx_a1b2c3d4",
+    "merchant_id": "m_001",
+    "amount_cents": 15000,
+    "currency": "CAD",
+    "status": "COMPLETED",
+    "idempotency_key": "order_12345",
+    "created_at": "2025-03-01T10:30:00Z"
+  }
+}
+```
+
+## API Examples
+
+POST `/payments`
+
+Request:
+
+```json
+{
+  "merchant_id": "m_123",
+  "amount": 100.50,
+  "currency": "USD"
+}
+```
+
+Response:
+
+```json
+{
+  "success": true,
+  "data": {
+    "transaction_id": "tx_456",
+    "status": "approved"
+  }
+}
+```
+
+Error example:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "AMOUNT_EXCEEDS_LIMIT",
+    "message": "amount exceeds limit"
+  }
+}
+```
+
+## API Contract
+
+The HTTP contract is documented in `api/openapi.yaml`.
+
+Use that file as the source of truth for endpoint paths, request bodies, and response shapes.
+
+## Environment Variables
+
+The repository includes a root-level `.env.example` file with safe placeholder values for local development. It documents the expected environment variables used by the application so you can create a private `.env` file without guessing the required keys.
+
+The example file includes:
+
+- `DB_HOST`
+- `DB_PORT`
+- `DB_USER`
+- `DB_PASSWORD`
+- `DB_NAME`
+- `PORT`
+
+## Metrics
+
+The API exposes a `GET /metrics` endpoint for Prometheus scraping. It uses the default Prometheus collector set and does not require custom application metrics to be enabled.
+
+This endpoint is intended for operational visibility during local development and production-style deployments.
+
+## Readiness
+
+The API exposes a `GET /ready` endpoint that returns:
+
+```json
+{
+  "status": "ready"
+}
+```
+
+It responds with HTTP `200` and is intended for readiness checks.
 
 ## Project Structure
 
@@ -152,91 +281,6 @@ payflow/
 └── go.mod
 ```
 
-## API
-
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| `GET` | `/health` | No | Liveness + readiness (DB ping) |
-| `GET` | `/metrics` | No | p50/p95/p99 latency, request counts |
-| `POST` | `/api/v1/transactions` | Bearer | Create payment |
-| `GET` | `/api/v1/transactions/{id}` | Bearer | Get transaction |
-| `POST` | `/api/v1/transactions/{id}/refund` | Bearer | Refund (atomic reverse) |
-| `GET` | `/api/v1/transactions/{id}/events` | Bearer | Audit trail |
-| `GET` | `/api/v1/merchants/{id}/balance` | Bearer | Merchant balance |
-| `GET` | `/api/v1/merchants/{id}/transactions` | Bearer | Paginated list |
-
-### Example: Create a payment
-
-The authenticated merchant comes from the Bearer API key, so the request body does not include `merchant_id`.
-
-```bash
-curl -X POST http://localhost:8080/api/v1/transactions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer sk_live_maple_001" \
-  -H "X-Idempotency-Key: order_12345" \
-  -d '{
-    "amount_cents": 15000,
-    "currency": "CAD"
-  }'
-```
-
-```json
-{
-  "success": true,
-  "data": {
-    "id": "tx_a1b2c3d4",
-    "merchant_id": "m_001",
-    "amount_cents": 15000,
-    "currency": "CAD",
-    "status": "COMPLETED",
-    "idempotency_key": "order_12345",
-    "created_at": "2025-03-01T10:30:00Z"
-  }
-}
-```
-
-## Quick Start
-
-```bash
-# Clone and start
-git clone https://github.com/aszender/payflow.git
-cd payflow
-docker-compose up -d --build
-
-# Verify
-curl http://localhost:8080/health | jq
-
-# Create a payment
-curl -X POST http://localhost:8080/api/v1/transactions \
-  -H "Authorization: Bearer sk_live_maple_001" \
-  -H "Content-Type: application/json" \
-  -H "X-Idempotency-Key: order_12345" \
-  -d '{"amount_cents":15000,"currency":"CAD"}'
-
-# Check merchant balance
-curl http://localhost:8080/api/v1/merchants/m_001/balance \
-  -H "Authorization: Bearer sk_live_maple_001" | jq
-```
-
-## Testing
-
-```bash
-go test -race -cover ./...
-go test -v ./internal/service/
-go test -v ./internal/handler/
-```
-
-Most tests run without Docker or PostgreSQL. PostgreSQL integration tests run when `TEST_DATABASE_URL` is set and are also wired into CI. The test suite covers service flows, validation errors, idempotency, refunds, balance tracking, state transitions, circuit breaker behavior, handler behavior, and repository integration paths.
-
-## CI
-
-GitHub Actions runs the automated validation pipeline on every push and pull request:
-
-- `go test ./...`
-- `go test -race ./...`
-- PostgreSQL-backed integration tests
-- Docker image build verification
-
 ## Key Patterns Implemented
 
 ### DBTX Interface
@@ -261,6 +305,37 @@ circuit opens and subsequent calls fail immediately instead of waiting for timeo
 After a cooldown period, a test request is allowed through — if it succeeds, the circuit
 closes.
 
+## Design Decisions and Trade-offs
+
+| Decision | Chose | Over | Why |
+|----------|-------|------|-----|
+| Database | PostgreSQL | MongoDB | ACID transactions required for financial data. Money needs consistency, not eventual consistency |
+| ORM | `database/sql` | GORM | Full control over queries and transactions. ORMs hide SQL complexity that matters in payment systems |
+| Framework | chi | gin/echo | Lightweight, stdlib-compatible. `net/http` signatures, no vendor lock-in |
+| Architecture | Hexagonal | Layered MVC | Repository interfaces enable testing without DB. Swap PostgreSQL for another persistence layer without touching business logic |
+| Bank call | Sync + outbox | Fully async | Client gets immediate response. Outbox preserves downstream delivery intent even if Kafka is temporarily unavailable |
+| Testing | Mocks + integration tests | Testcontainers-only | Unit tests stay fast, and PostgreSQL integration tests run in CI |
+| Rate limiting | In-memory token bucket | Redis-based | Simpler for single instance. Production would use Redis for global enforcement across pods |
+
+## Testing
+
+```bash
+go test -race -cover ./...
+go test -v ./internal/service/
+go test -v ./internal/handler/
+```
+
+Most tests run without Docker or PostgreSQL. PostgreSQL integration tests run when `TEST_DATABASE_URL` is set and are also wired into CI. The test suite covers service flows, validation errors, idempotency, refunds, balance tracking, state transitions, circuit breaker behavior, handler behavior, and repository integration paths.
+
+## CI
+
+GitHub Actions runs the automated validation pipeline on every push and pull request:
+
+- `go test ./...`
+- `go test -race ./...`
+- PostgreSQL-backed integration tests
+- Docker image build verification
+
 ## Production Considerations
 
 Things this project demonstrates vs. what a production system would add:
@@ -274,81 +349,6 @@ Things this project demonstrates vs. what a production system would add:
 | Basic API key auth | OAuth2 + mTLS + PCI DSS compliance |
 | Manual SQL migrations executed at startup | golang-migrate or Atlas |
 | Basic K8s manifests included in repo | Fully hardened deployment specs and autoscaling |
-
-## API Examples
-
-POST `/payments`
-
-Request:
-
-```json
-{
-  "merchant_id": "m_123",
-  "amount": 100.50,
-  "currency": "USD"
-}
-```
-
-Response:
-
-```json
-{
-  "success": true,
-  "data": {
-    "transaction_id": "tx_456",
-    "status": "approved"
-  }
-}
-```
-
-Error example:
-
-```json
-{
-  "success": false,
-  "error": {
-    "code": "AMOUNT_EXCEEDS_LIMIT",
-    "message": "amount exceeds limit"
-  }
-}
-```
-
-## Environment Variables
-
-The repository includes a root-level `.env.example` file with safe placeholder values for local development. It documents the expected environment variables used by the application so you can create a private `.env` file without guessing the required keys.
-
-The example file includes:
-
-- `DB_HOST`
-- `DB_PORT`
-- `DB_USER`
-- `DB_PASSWORD`
-- `DB_NAME`
-- `PORT`
-
-## Metrics
-
-The API exposes a `GET /metrics` endpoint for Prometheus scraping. It uses the default Prometheus collector set and does not require custom application metrics to be enabled.
-
-This endpoint is intended for operational visibility during local development and production-style deployments.
-
-## Readiness
-
-The API exposes a `GET /ready` endpoint that returns:
-
-```json
-{
-  "status": "ready"
-}
-```
-
-It responds with HTTP `200` and is intended for readiness checks.
-
-## API Contract
-
-The HTTP contract is documented in `api/openapi.yaml`.
-
-Use that file as the source of truth for endpoint paths, request bodies, and response shapes.
 
 ## License
 
