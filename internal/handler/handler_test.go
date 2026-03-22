@@ -40,8 +40,8 @@ func newHandlerTestSuite() *handlerTestSuite {
 			MaxDelay:    2 * time.Millisecond,
 			Jitter:      0,
 		},
-		BankTimeout:    time.Second,
-		MaxTransaction: 25000,
+		BankTimeout:         time.Second,
+		MaxTransactionCents: 2500000,
 	})
 
 	txHandler := NewTransactionHandler(svc)
@@ -100,7 +100,7 @@ func TestHealth_ReturnsOK(t *testing.T) {
 
 func TestCreate_Success(t *testing.T) {
 	suite := newHandlerTestSuite()
-	req := authRequest(http.MethodPost, "/api/v1/transactions", []byte(`{"merchant_id":"m_001","amount":150,"currency":"CAD"}`))
+	req := authRequest(http.MethodPost, "/api/v1/transactions", []byte(`{"amount_cents":15000,"currency":"CAD"}`))
 	req.Header.Set("X-Idempotency-Key", "order_123")
 	rec := httptest.NewRecorder()
 
@@ -133,7 +133,7 @@ func TestCreate_InvalidJSON(t *testing.T) {
 
 func TestCreate_MissingAuth(t *testing.T) {
 	suite := newHandlerTestSuite()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/transactions", bytes.NewReader([]byte(`{"merchant_id":"m_001","amount":150,"currency":"CAD"}`)))
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/transactions", bytes.NewReader([]byte(`{"amount_cents":15000,"currency":"CAD"}`)))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 
@@ -146,7 +146,7 @@ func TestCreate_MissingAuth(t *testing.T) {
 
 func TestGetTransaction_Success(t *testing.T) {
 	suite := newHandlerTestSuite()
-	createReq := authRequest(http.MethodPost, "/api/v1/transactions", []byte(`{"merchant_id":"m_001","amount":125,"currency":"CAD"}`))
+	createReq := authRequest(http.MethodPost, "/api/v1/transactions", []byte(`{"amount_cents":12500,"currency":"CAD"}`))
 	createRec := httptest.NewRecorder()
 	suite.router.ServeHTTP(createRec, createReq)
 
@@ -171,7 +171,7 @@ func TestGetTransaction_Success(t *testing.T) {
 
 func TestRefund_Success(t *testing.T) {
 	suite := newHandlerTestSuite()
-	createReq := authRequest(http.MethodPost, "/api/v1/transactions", []byte(`{"merchant_id":"m_001","amount":200,"currency":"CAD"}`))
+	createReq := authRequest(http.MethodPost, "/api/v1/transactions", []byte(`{"amount_cents":20000,"currency":"CAD"}`))
 	createRec := httptest.NewRecorder()
 	suite.router.ServeHTTP(createRec, createReq)
 
@@ -202,6 +202,18 @@ func TestGetBalance_Success(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+}
+
+func TestGetBalance_RejectsCrossMerchantAccess(t *testing.T) {
+	suite := newHandlerTestSuite()
+	req := authRequest(http.MethodGet, "/api/v1/merchants/m_002/balance", nil)
+	rec := httptest.NewRecorder()
+
+	suite.router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", rec.Code)
 	}
 }
 

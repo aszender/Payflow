@@ -83,8 +83,8 @@ func main() {
 			MaxDelay:    cfg.BankRetryMax,
 			Jitter:      cfg.BankRetryJitter,
 		},
-		BankTimeout:    cfg.BankAPITimeout,
-		MaxTransaction: cfg.MaxTransactionAmt,
+		BankTimeout:         cfg.BankAPITimeout,
+		MaxTransactionCents: cfg.MaxTransactionCents,
 	})
 
 	// --- Outbox Worker (background goroutine) ---

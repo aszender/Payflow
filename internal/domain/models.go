@@ -52,7 +52,7 @@ func (s TransactionStatus) IsTerminal() bool {
 type Transaction struct {
 	ID             string            `json:"id"`
 	MerchantID     string            `json:"merchant_id"`
-	Amount         float64           `json:"amount"`
+	AmountCents    int64             `json:"amount_cents"`
 	Currency       string            `json:"currency"`
 	Status         TransactionStatus `json:"status"`
 	IdempotencyKey string            `json:"idempotency_key,omitempty"`
@@ -73,18 +73,22 @@ const (
 )
 
 type Merchant struct {
-	ID        string         `json:"id"`
-	Name      string         `json:"name"`
-	APIKey    string         `json:"-"` // never expose in JSON responses
-	Balance   float64        `json:"balance"`
-	Currency  string         `json:"currency"`
-	Status    MerchantStatus `json:"status"`
-	CreatedAt time.Time      `json:"created_at"`
-	UpdatedAt time.Time      `json:"updated_at"`
+	ID           string         `json:"id"`
+	Name         string         `json:"name"`
+	APIKey       string         `json:"-"` // never expose in JSON responses
+	BalanceCents int64          `json:"balance_cents"`
+	Currency     string         `json:"currency"`
+	Status       MerchantStatus `json:"status"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
 }
 
 func (m *Merchant) IsActive() bool {
 	return m.Status == MerchantActive
+}
+
+func formatCents(cents int64) string {
+	return fmt.Sprintf("%.2f", float64(cents)/100)
 }
 
 // --- Transaction Event (Audit Trail) ---
@@ -130,5 +134,5 @@ func NewListParams(limit, offset int) ListParams {
 
 func (t *Transaction) String() string {
 	return fmt.Sprintf("Transaction{id=%s, merchant=%s, amount=%.2f %s, status=%s}",
-		t.ID, t.MerchantID, t.Amount, t.Currency, t.Status)
+		t.ID, t.MerchantID, float64(t.AmountCents)/100, t.Currency, t.Status)
 }

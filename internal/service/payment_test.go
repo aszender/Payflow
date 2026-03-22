@@ -30,8 +30,8 @@ func newTestService() *PaymentService {
 			MaxDelay:    2 * time.Millisecond,
 			Jitter:      0,
 		},
-		BankTimeout:    5 * time.Second,
-		MaxTransaction: 25000,
+		BankTimeout:         5 * time.Second,
+		MaxTransactionCents: 2500000,
 	})
 }
 
@@ -72,9 +72,9 @@ func TestCreateTransaction_Success(t *testing.T) {
 	ctx := context.Background()
 
 	tx, err := svc.CreateTransaction(ctx, CreateTransactionInput{
-		MerchantID: "m_001",
-		Amount:     150.00,
-		Currency:   "CAD",
+		MerchantID:  "m_001",
+		AmountCents: 15000,
+		Currency:    "CAD",
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -82,8 +82,8 @@ func TestCreateTransaction_Success(t *testing.T) {
 	if tx.Status != domain.TxStatusCompleted {
 		t.Errorf("expected COMPLETED, got %s", tx.Status)
 	}
-	if tx.Amount != 150.00 {
-		t.Errorf("expected 150.00, got %.2f", tx.Amount)
+	if tx.AmountCents != 15000 {
+		t.Errorf("expected 15000, got %d", tx.AmountCents)
 	}
 	if tx.MerchantID != "m_001" {
 		t.Errorf("expected m_001, got %s", tx.MerchantID)
@@ -104,27 +104,27 @@ func TestCreateTransaction_ValidationErrors(t *testing.T) {
 	}{
 		{
 			name:    "zero amount",
-			input:   CreateTransactionInput{MerchantID: "m_001", Amount: 0, Currency: "CAD"},
+			input:   CreateTransactionInput{MerchantID: "m_001", AmountCents: 0, Currency: "CAD"},
 			wantErr: domain.ErrInvalidAmount,
 		},
 		{
 			name:    "negative amount",
-			input:   CreateTransactionInput{MerchantID: "m_001", Amount: -50, Currency: "CAD"},
+			input:   CreateTransactionInput{MerchantID: "m_001", AmountCents: -5000, Currency: "CAD"},
 			wantErr: domain.ErrInvalidAmount,
 		},
 		{
 			name:    "merchant not found",
-			input:   CreateTransactionInput{MerchantID: "m_999", Amount: 100, Currency: "CAD"},
+			input:   CreateTransactionInput{MerchantID: "m_999", AmountCents: 10000, Currency: "CAD"},
 			wantErr: domain.ErrMerchantNotFound,
 		},
 		{
 			name:    "invalid currency",
-			input:   CreateTransactionInput{MerchantID: "m_001", Amount: 100, Currency: "EUR"},
+			input:   CreateTransactionInput{MerchantID: "m_001", AmountCents: 10000, Currency: "EUR"},
 			wantErr: domain.ErrInvalidCurrency,
 		},
 		{
 			name:    "exceeds limit",
-			input:   CreateTransactionInput{MerchantID: "m_001", Amount: 50000, Currency: "CAD"},
+			input:   CreateTransactionInput{MerchantID: "m_001", AmountCents: 5000000, Currency: "CAD"},
 			wantErr: domain.ErrAmountExceedsLimit,
 		},
 	}
@@ -145,7 +145,7 @@ func TestCreateTransaction_Idempotency(t *testing.T) {
 
 	input := CreateTransactionInput{
 		MerchantID:     "m_001",
-		Amount:         100,
+		AmountCents:    10000,
 		Currency:       "CAD",
 		IdempotencyKey: "idem_abc123",
 	}
@@ -172,9 +172,9 @@ func TestCreateTransaction_ContextCanceled(t *testing.T) {
 	cancel()
 
 	tx, err := svc.CreateTransaction(ctx, CreateTransactionInput{
-		MerchantID: "m_001",
-		Amount:     100,
-		Currency:   "CAD",
+		MerchantID:  "m_001",
+		AmountCents: 10000,
+		Currency:    "CAD",
 	})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation, got %v", err)
@@ -190,7 +190,7 @@ func TestCreateTransaction_IdempotencyConflict(t *testing.T) {
 
 	input := CreateTransactionInput{
 		MerchantID:     "m_001",
-		Amount:         100,
+		AmountCents:    10000,
 		Currency:       "CAD",
 		IdempotencyKey: "idem_conflict",
 		Description:    "first",
@@ -202,7 +202,7 @@ func TestCreateTransaction_IdempotencyConflict(t *testing.T) {
 
 	_, err := svc.CreateTransaction(ctx, CreateTransactionInput{
 		MerchantID:     "m_001",
-		Amount:         101,
+		AmountCents:    10100,
 		Currency:       "CAD",
 		IdempotencyKey: "idem_conflict",
 		Description:    "first",
@@ -232,14 +232,14 @@ func TestCreateTransaction_BankTimeoutPropagatesAndMarksFailed(t *testing.T) {
 			MaxDelay:    time.Millisecond,
 			Jitter:      0,
 		},
-		BankTimeout:    time.Millisecond,
-		MaxTransaction: 25000,
+		BankTimeout:         time.Millisecond,
+		MaxTransactionCents: 2500000,
 	})
 
 	tx, err := svc.CreateTransaction(context.Background(), CreateTransactionInput{
-		MerchantID: "m_001",
-		Amount:     100,
-		Currency:   "CAD",
+		MerchantID:  "m_001",
+		AmountCents: 10000,
+		Currency:    "CAD",
 	})
 	if !errors.Is(err, domain.ErrBankTimeout) {
 		t.Fatalf("expected bank timeout, got %v", err)
@@ -255,8 +255,8 @@ func TestCreateTransaction_BankTimeoutPropagatesAndMarksFailed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("merchant lookup: %v", err)
 	}
-	if merchant.Balance != 0 {
-		t.Fatalf("expected unchanged balance, got %.2f", merchant.Balance)
+	if merchant.BalanceCents != 0 {
+		t.Fatalf("expected unchanged balance, got %d", merchant.BalanceCents)
 	}
 
 	events, err := eventRepo.ListByTransaction(context.Background(), tx.ID)
@@ -304,14 +304,14 @@ func TestCreateTransaction_TransitionEventFailurePropagates(t *testing.T) {
 			MaxDelay:    time.Millisecond,
 			Jitter:      0,
 		},
-		BankTimeout:    time.Second,
-		MaxTransaction: 25000,
+		BankTimeout:         time.Second,
+		MaxTransactionCents: 2500000,
 	})
 
 	tx, err := svc.CreateTransaction(context.Background(), CreateTransactionInput{
-		MerchantID: "m_001",
-		Amount:     100,
-		Currency:   "CAD",
+		MerchantID:  "m_001",
+		AmountCents: 10000,
+		Currency:    "CAD",
 	})
 	if !errors.Is(err, eventErr) {
 		t.Fatalf("expected event failure, got %v", err)
@@ -342,7 +342,7 @@ func TestRefund_Success(t *testing.T) {
 	ctx := context.Background()
 
 	tx, err := svc.CreateTransaction(ctx, CreateTransactionInput{
-		MerchantID: "m_001", Amount: 200, Currency: "CAD",
+		MerchantID: "m_001", AmountCents: 20000, Currency: "CAD",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
@@ -351,7 +351,7 @@ func TestRefund_Success(t *testing.T) {
 		t.Fatalf("expected COMPLETED, got %s", tx.Status)
 	}
 
-	refunded, err := svc.RefundTransaction(ctx, tx.ID, "customer request")
+	refunded, err := svc.RefundTransaction(ctx, tx.MerchantID, tx.ID, "customer request")
 	if err != nil {
 		t.Fatalf("refund: %v", err)
 	}
@@ -380,20 +380,20 @@ func TestRefund_EmitsOutboxEvent(t *testing.T) {
 			MaxDelay:    time.Millisecond,
 			Jitter:      0,
 		},
-		BankTimeout:    time.Second,
-		MaxTransaction: 25000,
+		BankTimeout:         time.Second,
+		MaxTransactionCents: 2500000,
 	})
 
 	tx, err := svc.CreateTransaction(context.Background(), CreateTransactionInput{
-		MerchantID: "m_001",
-		Amount:     200,
-		Currency:   "CAD",
+		MerchantID:  "m_001",
+		AmountCents: 20000,
+		Currency:    "CAD",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
-	if _, err := svc.RefundTransaction(context.Background(), tx.ID, "customer request"); err != nil {
+	if _, err := svc.RefundTransaction(context.Background(), tx.MerchantID, tx.ID, "customer request"); err != nil {
 		t.Fatalf("refund: %v", err)
 	}
 
@@ -412,7 +412,7 @@ func TestRefund_CannotRefundPending(t *testing.T) {
 		ID: "tx_pending_test", Status: domain.TxStatusPending, MerchantID: "m_001",
 	})
 
-	_, err := svc.RefundTransaction(ctx, "tx_pending_test", "test")
+	_, err := svc.RefundTransaction(ctx, "m_001", "tx_pending_test", "test")
 	if !errors.Is(err, domain.ErrCannotRefund) {
 		t.Errorf("expected ErrCannotRefund, got %v", err)
 	}
@@ -423,15 +423,15 @@ func TestRefund_CannotRefundTwice(t *testing.T) {
 	ctx := context.Background()
 
 	tx, _ := svc.CreateTransaction(ctx, CreateTransactionInput{
-		MerchantID: "m_001", Amount: 100, Currency: "CAD",
+		MerchantID: "m_001", AmountCents: 10000, Currency: "CAD",
 	})
 
-	_, err := svc.RefundTransaction(ctx, tx.ID, "first refund")
+	_, err := svc.RefundTransaction(ctx, tx.MerchantID, tx.ID, "first refund")
 	if err != nil {
 		t.Fatalf("first refund: %v", err)
 	}
 
-	_, err = svc.RefundTransaction(ctx, tx.ID, "second refund")
+	_, err = svc.RefundTransaction(ctx, tx.MerchantID, tx.ID, "second refund")
 	if !errors.Is(err, domain.ErrCannotRefund) {
 		t.Errorf("expected ErrCannotRefund for double refund, got %v", err)
 	}
@@ -442,10 +442,10 @@ func TestTransactionHistory(t *testing.T) {
 	ctx := context.Background()
 
 	tx, _ := svc.CreateTransaction(ctx, CreateTransactionInput{
-		MerchantID: "m_001", Amount: 100, Currency: "CAD",
+		MerchantID: "m_001", AmountCents: 10000, Currency: "CAD",
 	})
 
-	events, err := svc.GetTransactionHistory(ctx, tx.ID)
+	events, err := svc.GetTransactionHistory(ctx, tx.MerchantID, tx.ID)
 	if err != nil {
 		t.Fatalf("get history: %v", err)
 	}
@@ -462,28 +462,28 @@ func TestMerchantBalanceUpdated(t *testing.T) {
 
 	// Initial balance is 0
 	merchant, _ := svc.GetMerchantBalance(ctx, "m_001")
-	if merchant.Balance != 0 {
-		t.Fatalf("expected initial balance 0, got %.2f", merchant.Balance)
+	if merchant.BalanceCents != 0 {
+		t.Fatalf("expected initial balance 0, got %d", merchant.BalanceCents)
 	}
 
 	// Process a payment
 	svc.CreateTransaction(ctx, CreateTransactionInput{
-		MerchantID: "m_001", Amount: 250, Currency: "CAD",
+		MerchantID: "m_001", AmountCents: 25000, Currency: "CAD",
 	})
 
 	// Balance should increase
 	merchant, _ = svc.GetMerchantBalance(ctx, "m_001")
-	if merchant.Balance != 250 {
-		t.Errorf("expected balance 250, got %.2f", merchant.Balance)
+	if merchant.BalanceCents != 25000 {
+		t.Errorf("expected balance 25000 cents, got %d", merchant.BalanceCents)
 	}
 
 	// Process another
 	svc.CreateTransaction(ctx, CreateTransactionInput{
-		MerchantID: "m_001", Amount: 100, Currency: "CAD",
+		MerchantID: "m_001", AmountCents: 10000, Currency: "CAD",
 	})
 	merchant, _ = svc.GetMerchantBalance(ctx, "m_001")
-	if merchant.Balance != 350 {
-		t.Errorf("expected balance 350, got %.2f", merchant.Balance)
+	if merchant.BalanceCents != 35000 {
+		t.Errorf("expected balance 35000 cents, got %d", merchant.BalanceCents)
 	}
 }
 

@@ -477,14 +477,14 @@ func TestCreateTransaction_BankTimeoutLeavesBalanceUnchangedAndMarksFailure(t *t
 			Jitter:      0,
 			ShouldRetry: isRetryableBankError,
 		},
-		BankTimeout:    5 * time.Millisecond,
-		MaxTransaction: 25000,
+		BankTimeout:         5 * time.Millisecond,
+		MaxTransactionCents: 2500000,
 	})
 
 	tx, err := svc.CreateTransaction(context.Background(), CreateTransactionInput{
-		MerchantID: "m_001",
-		Amount:     75,
-		Currency:   "CAD",
+		MerchantID:  "m_001",
+		AmountCents: 7500,
+		Currency:    "CAD",
 	})
 	if !errors.Is(err, domain.ErrBankTimeout) {
 		t.Fatalf("expected bank timeout error, got %v", err)
@@ -508,8 +508,8 @@ func TestCreateTransaction_BankTimeoutLeavesBalanceUnchangedAndMarksFailure(t *t
 	if err != nil {
 		t.Fatalf("load merchant: %v", err)
 	}
-	if merchant.Balance != 0 {
-		t.Fatalf("expected unchanged balance after bank timeout, got %.2f", merchant.Balance)
+	if merchant.BalanceCents != 0 {
+		t.Fatalf("expected unchanged balance after bank timeout, got %d", merchant.BalanceCents)
 	}
 
 	history, err := events.ListByTransaction(context.Background(), tx.ID)

@@ -54,7 +54,7 @@ func resetDatabase(t *testing.T, db *DB) {
 		INSERT INTO merchants (id, name, api_key, balance, currency, status)
 		VALUES
 			('m_001', 'Maple Sports', 'sk_live_maple_001', 0, 'CAD', 'ACTIVE'),
-			('m_002', 'Northern Gaming', 'sk_live_northern_002', 500, 'CAD', 'ACTIVE')
+			('m_002', 'Northern Gaming', 'sk_live_northern_002', 50000, 'CAD', 'ACTIVE')
 	`)
 	if err != nil {
 		t.Fatalf("seed merchants: %v", err)
@@ -81,7 +81,7 @@ func TestTransactionRepo_CreateAndGetByID(t *testing.T) {
 	tx := &domain.Transaction{
 		ID:             "tx_integration_001",
 		MerchantID:     "m_001",
-		Amount:         125.50,
+		AmountCents:    12550,
 		Currency:       "CAD",
 		Status:         domain.TxStatusPending,
 		IdempotencyKey: "integration-order-001",
@@ -120,7 +120,7 @@ func TestEventRepo_CreateAndList(t *testing.T) {
 	tx := &domain.Transaction{
 		ID:         "tx_events_001",
 		MerchantID: "m_001",
-		Amount:     50,
+		AmountCents: 5000,
 		Currency:   "CAD",
 		Status:     domain.TxStatusPending,
 		CreatedAt:  time.Now().UTC(),

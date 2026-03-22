@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -29,15 +30,15 @@ type Config struct {
 	RateLimitBurst int
 
 	// Payment Processing
-	BankAPITimeout    time.Duration
-	BankAPIURL        string
-	BankMaxRetries    int
-	BankRetryBase     time.Duration
-	BankRetryMax      time.Duration
-	BankRetryJitter   time.Duration
-	BankCBThreshold   int
-	BankCBReset       time.Duration
-	MaxTransactionAmt float64
+	BankAPITimeout      time.Duration
+	BankAPIURL          string
+	BankMaxRetries      int
+	BankRetryBase       time.Duration
+	BankRetryMax        time.Duration
+	BankRetryJitter     time.Duration
+	BankCBThreshold     int
+	BankCBReset         time.Duration
+	MaxTransactionCents int64
 }
 
 func Load() (*Config, error) {
@@ -63,15 +64,15 @@ func Load() (*Config, error) {
 		RateLimitRPS:   getEnvInt("RATE_LIMIT_RPS", 10),
 		RateLimitBurst: getEnvInt("RATE_LIMIT_BURST", 20),
 
-		BankAPITimeout:    time.Duration(getEnvInt("BANK_API_TIMEOUT_SEC", 5)) * time.Second,
-		BankAPIURL:        getEnv("BANK_API_URL", ""),
-		BankMaxRetries:    getEnvInt("BANK_MAX_RETRIES", 3),
-		BankRetryBase:     time.Duration(getEnvInt("BANK_RETRY_BASE_MS", 100)) * time.Millisecond,
-		BankRetryMax:      time.Duration(getEnvInt("BANK_RETRY_MAX_MS", 1000)) * time.Millisecond,
-		BankRetryJitter:   time.Duration(getEnvInt("BANK_RETRY_JITTER_MS", 50)) * time.Millisecond,
-		BankCBThreshold:   getEnvInt("BANK_CB_THRESHOLD", 3),
-		BankCBReset:       time.Duration(getEnvInt("BANK_CB_RESET_SEC", 5)) * time.Second,
-		MaxTransactionAmt: getEnvFloat("MAX_TRANSACTION_AMOUNT", 25000.00),
+		BankAPITimeout:      time.Duration(getEnvInt("BANK_API_TIMEOUT_SEC", 5)) * time.Second,
+		BankAPIURL:          getEnv("BANK_API_URL", ""),
+		BankMaxRetries:      getEnvInt("BANK_MAX_RETRIES", 3),
+		BankRetryBase:       time.Duration(getEnvInt("BANK_RETRY_BASE_MS", 100)) * time.Millisecond,
+		BankRetryMax:        time.Duration(getEnvInt("BANK_RETRY_MAX_MS", 1000)) * time.Millisecond,
+		BankRetryJitter:     time.Duration(getEnvInt("BANK_RETRY_JITTER_MS", 50)) * time.Millisecond,
+		BankCBThreshold:     getEnvInt("BANK_CB_THRESHOLD", 3),
+		BankCBReset:         time.Duration(getEnvInt("BANK_CB_RESET_SEC", 5)) * time.Second,
+		MaxTransactionCents: maxTransactionCents(),
 	}
 
 	return cfg, nil
@@ -102,6 +103,26 @@ func getEnvInt(key string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func getEnvInt64(key string, fallback int64) int64 {
+	val := getEnv(key, "")
+	if val == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(val, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func maxTransactionCents() int64 {
+	if cents := getEnvInt64("MAX_TRANSACTION_AMOUNT_CENTS", 0); cents > 0 {
+		return cents
+	}
+	amount := getEnvFloat("MAX_TRANSACTION_AMOUNT", 25000.00)
+	return int64(math.Round(amount * 100))
 }
 
 func getEnvFloat(key string, fallback float64) float64 {

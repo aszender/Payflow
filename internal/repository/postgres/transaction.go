@@ -29,9 +29,9 @@ func (r *TransactionRepo) Create(ctx context.Context, t *domain.Transaction) err
 
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO transactions
-			(id, merchant_id, amount, currency, status, idempotency_key, description, metadata, created_at, updated_at)
+			(id, merchant_id, amount_cents, currency, status, idempotency_key, description, metadata, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, NULLIF($6,''), NULLIF($7,''), $8, $9, $10)`,
-		t.ID, t.MerchantID, t.Amount, t.Currency, t.Status,
+		t.ID, t.MerchantID, t.AmountCents, t.Currency, t.Status,
 		t.IdempotencyKey, t.Description, metadata,
 		t.CreatedAt, t.UpdatedAt,
 	)
@@ -45,10 +45,10 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id string) (*domain.Trans
 	t := &domain.Transaction{}
 	var idempKey, desc sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, merchant_id, amount, currency, status,
+		`SELECT id, merchant_id, amount_cents, currency, status,
 				idempotency_key, description, metadata, created_at, updated_at
 		 FROM transactions WHERE id = $1`, id,
-	).Scan(&t.ID, &t.MerchantID, &t.Amount, &t.Currency, &t.Status,
+	).Scan(&t.ID, &t.MerchantID, &t.AmountCents, &t.Currency, &t.Status,
 		&idempKey, &desc, &t.Metadata, &t.CreatedAt, &t.UpdatedAt)
 
 	if err == sql.ErrNoRows {
@@ -70,10 +70,10 @@ func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, key string) (
 	t := &domain.Transaction{}
 	var idempKey, desc sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, merchant_id, amount, currency, status,
+		`SELECT id, merchant_id, amount_cents, currency, status,
 				idempotency_key, description, metadata, created_at, updated_at
 		 FROM transactions WHERE idempotency_key = $1`, key,
-	).Scan(&t.ID, &t.MerchantID, &t.Amount, &t.Currency, &t.Status,
+	).Scan(&t.ID, &t.MerchantID, &t.AmountCents, &t.Currency, &t.Status,
 		&idempKey, &desc, &t.Metadata, &t.CreatedAt, &t.UpdatedAt)
 
 	if err == sql.ErrNoRows {
@@ -118,7 +118,7 @@ func (r *TransactionRepo) ListByMerchant(ctx context.Context, merchantID string,
 
 	// Get page
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, merchant_id, amount, currency, status,
+		`SELECT id, merchant_id, amount_cents, currency, status,
 				idempotency_key, description, metadata, created_at, updated_at
 		 FROM transactions
 		 WHERE merchant_id = $1
@@ -135,7 +135,7 @@ func (r *TransactionRepo) ListByMerchant(ctx context.Context, merchantID string,
 	for rows.Next() {
 		t := &domain.Transaction{}
 		var idempKey, desc sql.NullString
-		if err := rows.Scan(&t.ID, &t.MerchantID, &t.Amount, &t.Currency, &t.Status,
+		if err := rows.Scan(&t.ID, &t.MerchantID, &t.AmountCents, &t.Currency, &t.Status,
 			&idempKey, &desc, &t.Metadata, &t.CreatedAt, &t.UpdatedAt); err != nil {
 			return nil, 0, fmt.Errorf("scan transaction: %w", err)
 		}

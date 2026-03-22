@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS transactions (
     id TEXT PRIMARY KEY,
     merchant_id TEXT NOT NULL REFERENCES merchants(id),
-    amount NUMERIC(12,2) NOT NULL,
+    amount BIGINT NOT NULL,
     currency TEXT NOT NULL,
     status TEXT NOT NULL,
     idempotency_key TEXT NULL,

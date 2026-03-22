@@ -24,9 +24,9 @@ func (r *MerchantRepo) WithTx(tx *sql.Tx) repository.MerchantRepository {
 func (r *MerchantRepo) GetByID(ctx context.Context, id string) (*domain.Merchant, error) {
 	m := &domain.Merchant{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, api_key, balance, currency, status, created_at, updated_at
+		`SELECT id, name, api_key, balance_cents, currency, status, created_at, updated_at
 		 FROM merchants WHERE id = $1`, id,
-	).Scan(&m.ID, &m.Name, &m.APIKey, &m.Balance, &m.Currency, &m.Status, &m.CreatedAt, &m.UpdatedAt)
+	).Scan(&m.ID, &m.Name, &m.APIKey, &m.BalanceCents, &m.Currency, &m.Status, &m.CreatedAt, &m.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, domain.ErrMerchantNotFound
@@ -40,9 +40,9 @@ func (r *MerchantRepo) GetByID(ctx context.Context, id string) (*domain.Merchant
 func (r *MerchantRepo) GetByAPIKey(ctx context.Context, apiKey string) (*domain.Merchant, error) {
 	m := &domain.Merchant{}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, api_key, balance, currency, status, created_at, updated_at
+		`SELECT id, name, api_key, balance_cents, currency, status, created_at, updated_at
 		 FROM merchants WHERE api_key = $1 AND status = 'ACTIVE'`, apiKey,
-	).Scan(&m.ID, &m.Name, &m.APIKey, &m.Balance, &m.Currency, &m.Status, &m.CreatedAt, &m.UpdatedAt)
+	).Scan(&m.ID, &m.Name, &m.APIKey, &m.BalanceCents, &m.Currency, &m.Status, &m.CreatedAt, &m.UpdatedAt)
 
 	if err == sql.ErrNoRows {
 		return nil, domain.ErrMerchantNotFound
@@ -53,11 +53,11 @@ func (r *MerchantRepo) GetByAPIKey(ctx context.Context, apiKey string) (*domain.
 	return m, nil
 }
 
-func (r *MerchantRepo) UpdateBalance(ctx context.Context, id string, delta float64) error {
+func (r *MerchantRepo) UpdateBalance(ctx context.Context, id string, delta int64) error {
 	result, err := r.db.ExecContext(ctx,
 		`UPDATE merchants
-		 SET balance = balance + $1, updated_at = NOW()
-		 WHERE id = $2 AND (balance + $1) >= 0`, // prevent negative balance
+		 SET balance_cents = balance_cents + $1, updated_at = NOW()
+		 WHERE id = $2 AND (balance_cents + $1) >= 0`, // prevent negative balance
 		delta, id,
 	)
 	if err != nil {

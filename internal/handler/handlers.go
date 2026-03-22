@@ -13,6 +13,7 @@ import (
 
 	"github.com/aszender/payflow/internal/domain"
 	"github.com/aszender/payflow/internal/metrics"
+	"github.com/aszender/payflow/internal/middleware"
 	"github.com/aszender/payflow/internal/service"
 )
 
@@ -84,6 +85,22 @@ func mapDomainError(w http.ResponseWriter, err error) {
 	}
 }
 
+func merchantFromContext(ctx context.Context) (*domain.Merchant, error) {
+	merchant, ok := ctx.Value(middleware.MerchantKey).(*domain.Merchant)
+	if !ok || merchant == nil {
+		return nil, errors.New("merchant authentication missing")
+	}
+	return merchant, nil
+}
+
+func ensureMerchantID(w http.ResponseWriter, merchant *domain.Merchant, id string) bool {
+	if merchant.ID != id {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "merchant access denied")
+		return false
+	}
+	return true
+}
+
 type TransactionHandler struct {
 	svc *service.PaymentService
 }
@@ -94,33 +111,35 @@ func NewTransactionHandler(svc *service.PaymentService) *TransactionHandler {
 
 func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		MerchantID  string  `json:"merchant_id"`
-		Amount      float64 `json:"amount"`
-		Currency    string  `json:"currency"`
-		Description string  `json:"description"`
+		AmountCents int64  `json:"amount_cents"`
+		Currency    string `json:"currency"`
+		Description string `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_JSON", "could not parse request body")
 		return
 	}
 
-	if req.MerchantID == "" {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "merchant_id is required")
+	if req.AmountCents <= 0 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "amount_cents must be positive")
 		return
 	}
-	if req.Amount <= 0 {
-		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "amount must be positive")
+
+	merchant, err := merchantFromContext(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
 		return
 	}
+
 	if req.Currency == "" {
-		req.Currency = "CAD" // default
+		req.Currency = merchant.Currency
 	}
 
 	idempotencyKey := r.Header.Get("X-Idempotency-Key")
 
 	tx, err := h.svc.CreateTransaction(r.Context(), service.CreateTransactionInput{
-		MerchantID:     req.MerchantID,
-		Amount:         req.Amount,
+		MerchantID:     merchant.ID,
+		AmountCents:    req.AmountCents,
 		Currency:       req.Currency,
 		IdempotencyKey: idempotencyKey,
 		Description:    req.Description,
@@ -136,7 +155,13 @@ func (h *TransactionHandler) Create(w http.ResponseWriter, r *http.Request) {
 func (h *TransactionHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 	txID := chi.URLParam(r, "id")
 
-	tx, err := h.svc.GetTransaction(r.Context(), txID)
+	merchant, err := merchantFromContext(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+
+	tx, err := h.svc.GetTransaction(r.Context(), merchant.ID, txID)
 	if err != nil {
 		mapDomainError(w, err)
 		return
@@ -153,7 +178,13 @@ func (h *TransactionHandler) Refund(w http.ResponseWriter, r *http.Request) {
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
-	tx, err := h.svc.RefundTransaction(r.Context(), txID, req.Reason)
+	merchant, err := merchantFromContext(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+
+	tx, err := h.svc.RefundTransaction(r.Context(), merchant.ID, txID, req.Reason)
 	if err != nil {
 		mapDomainError(w, err)
 		return
@@ -165,7 +196,13 @@ func (h *TransactionHandler) Refund(w http.ResponseWriter, r *http.Request) {
 func (h *TransactionHandler) GetEvents(w http.ResponseWriter, r *http.Request) {
 	txID := chi.URLParam(r, "id")
 
-	events, err := h.svc.GetTransactionHistory(r.Context(), txID)
+	merchant, err := merchantFromContext(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+
+	events, err := h.svc.GetTransactionHistory(r.Context(), merchant.ID, txID)
 	if err != nil {
 		mapDomainError(w, err)
 		return
@@ -180,6 +217,15 @@ func (h *TransactionHandler) ListByMerchant(w http.ResponseWriter, r *http.Reque
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
 	params := domain.NewListParams(limit, offset)
+
+	merchant, err := merchantFromContext(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	if !ensureMerchantID(w, merchant, merchantID) {
+		return
+	}
 
 	txns, total, err := h.svc.ListTransactions(r.Context(), merchantID, params)
 	if err != nil {
@@ -203,6 +249,15 @@ func NewMerchantHandler(svc *service.PaymentService) *MerchantHandler {
 func (h *MerchantHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	merchantID := chi.URLParam(r, "id")
 
+	merchantAuth, err := merchantFromContext(r.Context())
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "authentication required")
+		return
+	}
+	if !ensureMerchantID(w, merchantAuth, merchantID) {
+		return
+	}
+
 	merchant, err := h.svc.GetMerchantBalance(r.Context(), merchantID)
 	if err != nil {
 		mapDomainError(w, err)
@@ -210,10 +265,10 @@ func (h *MerchantHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"merchant_id": merchant.ID,
-		"name":        merchant.Name,
-		"balance":     merchant.Balance,
-		"currency":    merchant.Currency,
+		"merchant_id":   merchant.ID,
+		"name":          merchant.Name,
+		"balance_cents": merchant.BalanceCents,
+		"currency":      merchant.Currency,
 	})
 }
 

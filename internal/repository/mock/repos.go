@@ -17,8 +17,8 @@ type MerchantRepo struct {
 func NewMerchantRepo() *MerchantRepo {
 	return &MerchantRepo{
 		Merchants: map[string]*domain.Merchant{
-			"m_001": {ID: "m_001", Name: "Maple Sports", APIKey: "sk_live_maple_001", Balance: 0, Currency: "CAD", Status: domain.MerchantActive},
-			"m_002": {ID: "m_002", Name: "Northern Gaming", APIKey: "sk_live_northern_002", Balance: 500, Currency: "CAD", Status: domain.MerchantActive},
+			"m_001": {ID: "m_001", Name: "Maple Sports", APIKey: "sk_live_maple_001", BalanceCents: 0, Currency: "CAD", Status: domain.MerchantActive},
+			"m_002": {ID: "m_002", Name: "Northern Gaming", APIKey: "sk_live_northern_002", BalanceCents: 50000, Currency: "CAD", Status: domain.MerchantActive},
 		},
 	}
 }
@@ -48,17 +48,17 @@ func (r *MerchantRepo) GetByAPIKey(_ context.Context, apiKey string) (*domain.Me
 	return nil, domain.ErrMerchantNotFound
 }
 
-func (r *MerchantRepo) UpdateBalance(_ context.Context, id string, delta float64) error {
+func (r *MerchantRepo) UpdateBalance(_ context.Context, id string, delta int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	m, ok := r.Merchants[id]
 	if !ok {
 		return domain.ErrMerchantNotFound
 	}
-	if m.Balance+delta < 0 {
+	if m.BalanceCents+delta < 0 {
 		return domain.ErrInsufficientFunds
 	}
-	m.Balance += delta
+	m.BalanceCents += delta
 	return nil
 }
 

@@ -15,32 +15,34 @@ import (
 	"github.com/aszender/payflow/internal/repository"
 )
 
+const DefaultMaxTransactionCents = 2500000 // $25,000.00
+
 type PaymentService struct {
-	db             *sql.DB
-	merchants      repository.MerchantRepository
-	txns           repository.TransactionRepository
-	events         repository.EventRepository
-	outbox         repository.OutboxRepository
-	logger         *slog.Logger
-	bank           BankClient
-	breaker        *CircuitBreaker
-	retry          RetryConfig
-	bankTimeout    time.Duration
-	maxTransaction float64
+	db                  *sql.DB
+	merchants           repository.MerchantRepository
+	txns                repository.TransactionRepository
+	events              repository.EventRepository
+	outbox              repository.OutboxRepository
+	logger              *slog.Logger
+	bank                BankClient
+	breaker             *CircuitBreaker
+	retry               RetryConfig
+	bankTimeout         time.Duration
+	maxTransactionCents int64
 }
 
 type PaymentServiceConfig struct {
-	DB             *sql.DB
-	Merchants      repository.MerchantRepository
-	Transactions   repository.TransactionRepository
-	Events         repository.EventRepository
-	Outbox         repository.OutboxRepository
-	Logger         *slog.Logger
-	BankClient     BankClient
-	CircuitBreaker *CircuitBreaker
-	RetryConfig    RetryConfig
-	BankTimeout    time.Duration
-	MaxTransaction float64
+	DB                  *sql.DB
+	Merchants           repository.MerchantRepository
+	Transactions        repository.TransactionRepository
+	Events              repository.EventRepository
+	Outbox              repository.OutboxRepository
+	Logger              *slog.Logger
+	BankClient          BankClient
+	CircuitBreaker      *CircuitBreaker
+	RetryConfig         RetryConfig
+	BankTimeout         time.Duration
+	MaxTransactionCents int64
 }
 
 func NewPaymentService(cfg PaymentServiceConfig) *PaymentService {
@@ -76,24 +78,29 @@ func NewPaymentService(cfg PaymentServiceConfig) *PaymentService {
 		retryCfg.ShouldRetry = isRetryableBankError
 	}
 
+	maxTransaction := cfg.MaxTransactionCents
+	if maxTransaction <= 0 {
+		maxTransaction = DefaultMaxTransactionCents
+	}
+
 	return &PaymentService{
-		db:             cfg.DB,
-		merchants:      cfg.Merchants,
-		txns:           cfg.Transactions,
-		events:         cfg.Events,
-		outbox:         cfg.Outbox,
-		logger:         logger,
-		bank:           bankClient,
-		breaker:        breaker,
-		retry:          retryCfg,
-		bankTimeout:    cfg.BankTimeout,
-		maxTransaction: cfg.MaxTransaction,
+		db:                  cfg.DB,
+		merchants:           cfg.Merchants,
+		txns:                cfg.Transactions,
+		events:              cfg.Events,
+		outbox:              cfg.Outbox,
+		logger:              logger,
+		bank:                bankClient,
+		breaker:             breaker,
+		retry:               retryCfg,
+		bankTimeout:         cfg.BankTimeout,
+		maxTransactionCents: maxTransaction,
 	}
 }
 
 type CreateTransactionInput struct {
 	MerchantID     string
-	Amount         float64
+	AmountCents    int64
 	Currency       string
 	IdempotencyKey string
 	Description    string
@@ -106,7 +113,7 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 
 	log := s.logger.With(
 		"merchant_id", input.MerchantID,
-		"amount", input.Amount,
+		"amount_cents", input.AmountCents,
 	)
 
 	if input.IdempotencyKey != "" {
@@ -131,10 +138,10 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 		return nil, domain.ErrMerchantInactive
 	}
 
-	if input.Amount <= 0 {
+	if input.AmountCents <= 0 {
 		return nil, domain.ErrInvalidAmount
 	}
-	if input.Amount > s.maxTransaction {
+	if input.AmountCents > s.maxTransactionCents {
 		return nil, domain.ErrAmountExceedsLimit
 	}
 
@@ -146,7 +153,7 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 	tx := &domain.Transaction{
 		ID:             generateTransactionID(),
 		MerchantID:     input.MerchantID,
-		Amount:         input.Amount,
+		AmountCents:    input.AmountCents,
 		Currency:       input.Currency,
 		Status:         domain.TxStatusPending,
 		IdempotencyKey: input.IdempotencyKey,
@@ -195,7 +202,7 @@ func (s *PaymentService) createInDBTransaction(ctx context.Context, tx *domain.T
 		payload, err := marshalOutboxPayload(map[string]interface{}{
 			"transaction_id": tx.ID,
 			"merchant_id":    tx.MerchantID,
-			"amount":         tx.Amount,
+			"amount_cents":   tx.AmountCents,
 			"currency":       tx.Currency,
 			"status":         tx.Status,
 		})
@@ -258,7 +265,10 @@ func (s *PaymentService) processPayment(ctx context.Context, tx *domain.Transact
 		return err
 	}
 
-	log.Info("transaction completed", "tx_id", tx.ID, "amount", tx.Amount)
+	log.Info("transaction completed",
+		"tx_id", tx.ID,
+		"amount_cents", tx.AmountCents,
+	)
 	return nil
 }
 
@@ -293,7 +303,7 @@ func (s *PaymentService) completeInDBTransaction(ctx context.Context, tx *domain
 		if err := txnRepo.UpdateStatus(ctx, tx.ID, to); err != nil {
 			return fmt.Errorf("set completed status: %w", err)
 		}
-		if err := merchantRepo.UpdateBalance(ctx, tx.MerchantID, tx.Amount); err != nil {
+		if err := merchantRepo.UpdateBalance(ctx, tx.MerchantID, tx.AmountCents); err != nil {
 			return fmt.Errorf("credit merchant balance: %w", err)
 		}
 		if err := eventRepo.Create(ctx, &domain.TransactionEvent{
@@ -333,12 +343,12 @@ func (s *PaymentService) completeWithMocks(ctx context.Context, tx *domain.Trans
 		return err
 	}
 
-	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, tx.Amount); err != nil {
+	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, tx.AmountCents); err != nil {
 		return fmt.Errorf("credit merchant balance: %w", err)
 	}
 
 	if err := s.transition(ctx, tx, domain.TxStatusCompleted); err != nil {
-		rollbackErr := s.merchants.UpdateBalance(ctx, tx.MerchantID, -tx.Amount)
+		rollbackErr := s.merchants.UpdateBalance(ctx, tx.MerchantID, -tx.AmountCents)
 		if rollbackErr != nil {
 			return errors.Join(err, fmt.Errorf("rollback credited balance: %w", rollbackErr))
 		}
@@ -352,7 +362,7 @@ func (s *PaymentService) callBank(parentCtx, bankCtx context.Context, tx *domain
 	req := BankChargeRequest{
 		TransactionID: tx.ID,
 		MerchantID:    tx.MerchantID,
-		Amount:        tx.Amount,
+		AmountCents:   tx.AmountCents,
 		Currency:      tx.Currency,
 	}
 
@@ -366,12 +376,12 @@ func (s *PaymentService) callBank(parentCtx, bankCtx context.Context, tx *domain
 	return normalizeBankError(parentCtx, bankCtx, err)
 }
 
-func (s *PaymentService) RefundTransaction(ctx context.Context, txID, reason string) (*domain.Transaction, error) {
+func (s *PaymentService) RefundTransaction(ctx context.Context, merchantID, txID, reason string) (*domain.Transaction, error) {
 	if err := contextError(ctx); err != nil {
 		return nil, err
 	}
 
-	tx, err := s.txns.GetByID(ctx, txID)
+	tx, err := s.ownedTransaction(ctx, merchantID, txID)
 	if err != nil {
 		return nil, err
 	}
@@ -403,7 +413,7 @@ func (s *PaymentService) refundInDBTransaction(ctx context.Context, tx *domain.T
 		if err := txnRepo.UpdateStatus(ctx, tx.ID, domain.TxStatusRefunded); err != nil {
 			return err
 		}
-		if err := merchantRepo.UpdateBalance(ctx, tx.MerchantID, -tx.Amount); err != nil {
+		if err := merchantRepo.UpdateBalance(ctx, tx.MerchantID, -tx.AmountCents); err != nil {
 			return err
 		}
 
@@ -425,7 +435,7 @@ func (s *PaymentService) refundInDBTransaction(ctx context.Context, tx *domain.T
 		outboxPayload, err := marshalOutboxPayload(map[string]interface{}{
 			"transaction_id": tx.ID,
 			"merchant_id":    tx.MerchantID,
-			"amount":         tx.Amount,
+			"amount_cents":   tx.AmountCents,
 			"status":         "REFUNDED",
 			"reason":         reason,
 		})
@@ -445,7 +455,7 @@ func (s *PaymentService) refundWithMocks(ctx context.Context, tx *domain.Transac
 		return err
 	}
 	tx.Status = domain.TxStatusRefunded
-	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, -tx.Amount); err != nil {
+	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, -tx.AmountCents); err != nil {
 		return err
 	}
 	payload, err := marshalOutboxPayload(map[string]string{"reason": reason})
@@ -468,8 +478,8 @@ func (s *PaymentService) refundWithMocks(ctx context.Context, tx *domain.Transac
 	})
 }
 
-func (s *PaymentService) GetTransaction(ctx context.Context, id string) (*domain.Transaction, error) {
-	return s.txns.GetByID(ctx, id)
+func (s *PaymentService) GetTransaction(ctx context.Context, merchantID, id string) (*domain.Transaction, error) {
+	return s.ownedTransaction(ctx, merchantID, id)
 }
 
 func (s *PaymentService) GetMerchantBalance(ctx context.Context, merchantID string) (*domain.Merchant, error) {
@@ -480,8 +490,22 @@ func (s *PaymentService) ListTransactions(ctx context.Context, merchantID string
 	return s.txns.ListByMerchant(ctx, merchantID, params)
 }
 
-func (s *PaymentService) GetTransactionHistory(ctx context.Context, txID string) ([]*domain.TransactionEvent, error) {
+func (s *PaymentService) GetTransactionHistory(ctx context.Context, merchantID, txID string) ([]*domain.TransactionEvent, error) {
+	if _, err := s.ownedTransaction(ctx, merchantID, txID); err != nil {
+		return nil, err
+	}
 	return s.events.ListByTransaction(ctx, txID)
+}
+
+func (s *PaymentService) ownedTransaction(ctx context.Context, merchantID, txID string) (*domain.Transaction, error) {
+	tx, err := s.txns.GetByID(ctx, txID)
+	if err != nil {
+		return nil, err
+	}
+	if tx.MerchantID != merchantID {
+		return nil, domain.ErrTransactionNotFound
+	}
+	return tx, nil
 }
 
 func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction, to domain.TransactionStatus) error {
@@ -559,7 +583,7 @@ func matchesIdempotentRequest(existing *domain.Transaction, input CreateTransact
 	}
 
 	return existing.MerchantID == input.MerchantID &&
-		existing.Amount == input.Amount &&
+		existing.AmountCents == input.AmountCents &&
 		existing.Currency == input.Currency &&
 		existing.Description == input.Description
 }
@@ -635,7 +659,7 @@ func transactionOutboxPayload(tx *domain.Transaction, extra map[string]interface
 	payload := map[string]interface{}{
 		"transaction_id": tx.ID,
 		"merchant_id":    tx.MerchantID,
-		"amount":         tx.Amount,
+		"amount_cents":   tx.AmountCents,
 		"currency":       tx.Currency,
 		"status":         tx.Status,
 	}
@@ -652,4 +676,8 @@ func marshalOutboxPayload(payload interface{}) (json.RawMessage, error) {
 		return nil, err
 	}
 	return raw, nil
+}
+
+func centsToDecimalString(cents int64) string {
+	return fmt.Sprintf("%.2f", float64(cents)/100)
 }

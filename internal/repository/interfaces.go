@@ -16,7 +16,7 @@ type DBTX interface {
 type MerchantRepository interface {
 	GetByID(ctx context.Context, id string) (*domain.Merchant, error)
 	GetByAPIKey(ctx context.Context, apiKey string) (*domain.Merchant, error)
-	UpdateBalance(ctx context.Context, id string, delta float64) error
+	UpdateBalance(ctx context.Context, id string, delta int64) error
 
 	WithTx(tx *sql.Tx) MerchantRepository
 }

@@ -13,10 +13,10 @@ import (
 )
 
 type BankChargeRequest struct {
-	TransactionID string  `json:"transaction_id"`
-	MerchantID    string  `json:"merchant_id"`
-	Amount        float64 `json:"amount"`
-	Currency      string  `json:"currency"`
+	TransactionID string `json:"transaction_id"`
+	MerchantID    string `json:"merchant_id"`
+	AmountCents   int64  `json:"amount_cents"`
+	Currency      string `json:"currency"`
 }
 
 type BankChargeResponse struct {
@@ -31,8 +31,8 @@ type BankClient interface {
 
 type SimulatedBankClient struct {
 	Latency       time.Duration
-	RejectAmounts map[float64]bool
-	FailAmounts   map[float64]bool
+	RejectAmounts map[int64]bool
+	FailAmounts   map[int64]bool
 }
 
 func (c *SimulatedBankClient) Charge(ctx context.Context, req BankChargeRequest) (*BankChargeResponse, error) {
@@ -47,10 +47,10 @@ func (c *SimulatedBankClient) Charge(ctx context.Context, req BankChargeRequest)
 	case <-time.After(latency):
 	}
 
-	if c.FailAmounts != nil && c.FailAmounts[req.Amount] {
+	if c.FailAmounts != nil && c.FailAmounts[req.AmountCents] {
 		return nil, domain.ErrBankUnavailable
 	}
-	if c.RejectAmounts != nil && c.RejectAmounts[req.Amount] {
+	if c.RejectAmounts != nil && c.RejectAmounts[req.AmountCents] {
 		return &BankChargeResponse{Approved: false, Code: "DECLINED", Message: "transaction declined"}, domain.ErrBankRejected
 	}
 

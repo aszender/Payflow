@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/aszender/payflow/internal/domain"
 	"github.com/aszender/payflow/internal/metrics"
 	"github.com/aszender/payflow/internal/repository"
 )
@@ -59,6 +60,11 @@ func GetRequestID(ctx context.Context) string {
 		return id
 	}
 	return "unknown"
+}
+
+func GetMerchant(ctx context.Context) (*domain.Merchant, bool) {
+	merchant, ok := ctx.Value(MerchantKey).(*domain.Merchant)
+	return merchant, ok && merchant != nil
 }
 
 func Logging(logger *slog.Logger) func(http.Handler) http.Handler {

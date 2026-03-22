@@ -39,7 +39,7 @@ func (r *failingBalanceMerchantRepo) GetByAPIKey(ctx context.Context, apiKey str
 	return r.inner.GetByAPIKey(ctx, apiKey)
 }
 
-func (r *failingBalanceMerchantRepo) UpdateBalance(ctx context.Context, id string, delta float64) error {
+func (r *failingBalanceMerchantRepo) UpdateBalance(ctx context.Context, id string, delta int64) error {
 	if delta > 0 {
 		return r.err
 	}
@@ -125,14 +125,14 @@ func TestCreateTransaction_CompletionFailureLeavesTransactionUncompleted(t *test
 			Jitter:      0,
 			ShouldRetry: isRetryableBankError,
 		},
-		BankTimeout:    time.Second,
-		MaxTransaction: 25000,
+		BankTimeout:         time.Second,
+		MaxTransactionCents: 2500000,
 	})
 
 	tx, err := svc.CreateTransaction(context.Background(), CreateTransactionInput{
-		MerchantID: "m_001",
-		Amount:     125,
-		Currency:   "CAD",
+		MerchantID:  "m_001",
+		AmountCents: 12500,
+		Currency:    "CAD",
 	})
 	if !errors.Is(err, errBalanceWriteFailed) {
 		t.Fatalf("expected balance write failure, got %v", err)
@@ -156,8 +156,8 @@ func TestCreateTransaction_CompletionFailureLeavesTransactionUncompleted(t *test
 	if err != nil {
 		t.Fatalf("load merchant: %v", err)
 	}
-	if merchant.Balance != 0 {
-		t.Fatalf("expected unchanged merchant balance after failed credit, got %.2f", merchant.Balance)
+	if merchant.BalanceCents != 0 {
+		t.Fatalf("expected unchanged merchant balance after failed credit, got %d", merchant.BalanceCents)
 	}
 
 	history, err := events.ListByTransaction(context.Background(), tx.ID)
