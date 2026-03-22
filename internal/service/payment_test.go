@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aszender/payflow/internal/domain"
+	"github.com/aszender/payflow/internal/repository"
 	"github.com/aszender/payflow/internal/repository/mock"
 )
 
@@ -31,6 +33,38 @@ func newTestService() *PaymentService {
 		BankTimeout:    5 * time.Second,
 		MaxTransaction: 25000,
 	})
+}
+
+type countingBankClient struct {
+	calls  int
+	charge func(context.Context, BankChargeRequest) (*BankChargeResponse, error)
+}
+
+func (c *countingBankClient) Charge(ctx context.Context, req BankChargeRequest) (*BankChargeResponse, error) {
+	c.calls++
+	if c.charge != nil {
+		return c.charge(ctx, req)
+	}
+	return &BankChargeResponse{Approved: true, Code: "APPROVED"}, nil
+}
+
+type failingEventRepo struct {
+	base            *mock.EventRepo
+	failOnEventType string
+	err             error
+}
+
+func (r *failingEventRepo) WithTx(_ *sql.Tx) repository.EventRepository { return r }
+
+func (r *failingEventRepo) Create(ctx context.Context, event *domain.TransactionEvent) error {
+	if event.EventType == r.failOnEventType {
+		return r.err
+	}
+	return r.base.Create(ctx, event)
+}
+
+func (r *failingEventRepo) ListByTransaction(ctx context.Context, txID string) ([]*domain.TransactionEvent, error) {
+	return r.base.ListByTransaction(ctx, txID)
 }
 
 func TestCreateTransaction_Success(t *testing.T) {
@@ -131,6 +165,171 @@ func TestCreateTransaction_Idempotency(t *testing.T) {
 	}
 }
 
+func TestCreateTransaction_ContextCanceled(t *testing.T) {
+	svc := newTestService()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tx, err := svc.CreateTransaction(ctx, CreateTransactionInput{
+		MerchantID: "m_001",
+		Amount:     100,
+		Currency:   "CAD",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if tx != nil {
+		t.Fatalf("expected no transaction, got %+v", tx)
+	}
+}
+
+func TestCreateTransaction_IdempotencyConflict(t *testing.T) {
+	svc := newTestService()
+	ctx := context.Background()
+
+	input := CreateTransactionInput{
+		MerchantID:     "m_001",
+		Amount:         100,
+		Currency:       "CAD",
+		IdempotencyKey: "idem_conflict",
+		Description:    "first",
+	}
+
+	if _, err := svc.CreateTransaction(ctx, input); err != nil {
+		t.Fatalf("first call: %v", err)
+	}
+
+	_, err := svc.CreateTransaction(ctx, CreateTransactionInput{
+		MerchantID:     "m_001",
+		Amount:         101,
+		Currency:       "CAD",
+		IdempotencyKey: "idem_conflict",
+		Description:    "first",
+	})
+	if !errors.Is(err, domain.ErrDuplicateTransaction) {
+		t.Fatalf("expected duplicate transaction error, got %v", err)
+	}
+}
+
+func TestCreateTransaction_BankTimeoutPropagatesAndMarksFailed(t *testing.T) {
+	merchantRepo := mock.NewMerchantRepo()
+	txRepo := mock.NewTransactionRepo()
+	eventRepo := mock.NewEventRepo()
+	outboxRepo := mock.NewOutboxRepo()
+
+	svc := NewPaymentService(PaymentServiceConfig{
+		Merchants:      merchantRepo,
+		Transactions:   txRepo,
+		Events:         eventRepo,
+		Outbox:         outboxRepo,
+		Logger:         slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})),
+		BankClient:     &SimulatedBankClient{Latency: 50 * time.Millisecond},
+		CircuitBreaker: NewCircuitBreaker(3, 50*time.Millisecond),
+		RetryConfig: RetryConfig{
+			MaxAttempts: 2,
+			BaseDelay:   time.Millisecond,
+			MaxDelay:    time.Millisecond,
+			Jitter:      0,
+		},
+		BankTimeout:    time.Millisecond,
+		MaxTransaction: 25000,
+	})
+
+	tx, err := svc.CreateTransaction(context.Background(), CreateTransactionInput{
+		MerchantID: "m_001",
+		Amount:     100,
+		Currency:   "CAD",
+	})
+	if !errors.Is(err, domain.ErrBankTimeout) {
+		t.Fatalf("expected bank timeout, got %v", err)
+	}
+	if tx == nil {
+		t.Fatal("expected transaction to be returned on processing failure")
+	}
+	if tx.Status != domain.TxStatusFailed {
+		t.Fatalf("expected FAILED status, got %s", tx.Status)
+	}
+
+	merchant, err := merchantRepo.GetByID(context.Background(), "m_001")
+	if err != nil {
+		t.Fatalf("merchant lookup: %v", err)
+	}
+	if merchant.Balance != 0 {
+		t.Fatalf("expected unchanged balance, got %.2f", merchant.Balance)
+	}
+
+	events, err := eventRepo.ListByTransaction(context.Background(), tx.ID)
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+	if len(events) != 3 {
+		t.Fatalf("expected 3 lifecycle events, got %d", len(events))
+	}
+
+	if len(outboxRepo.Events) != 2 {
+		t.Fatalf("expected 2 outbox events, got %d", len(outboxRepo.Events))
+	}
+	if outboxRepo.Events[0].EventType != "transaction.created" {
+		t.Fatalf("expected created outbox event, got %s", outboxRepo.Events[0].EventType)
+	}
+	if outboxRepo.Events[1].EventType != "transaction.failed" {
+		t.Fatalf("expected failed outbox event, got %s", outboxRepo.Events[1].EventType)
+	}
+}
+
+func TestCreateTransaction_TransitionEventFailurePropagates(t *testing.T) {
+	merchantRepo := mock.NewMerchantRepo()
+	txRepo := mock.NewTransactionRepo()
+	eventErr := errors.New("event store unavailable")
+	eventRepo := &failingEventRepo{
+		base:            mock.NewEventRepo(),
+		failOnEventType: "STATUS_PROCESSING",
+		err:             eventErr,
+	}
+	outboxRepo := mock.NewOutboxRepo()
+	bankClient := &countingBankClient{}
+
+	svc := NewPaymentService(PaymentServiceConfig{
+		Merchants:      merchantRepo,
+		Transactions:   txRepo,
+		Events:         eventRepo,
+		Outbox:         outboxRepo,
+		Logger:         slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})),
+		BankClient:     bankClient,
+		CircuitBreaker: NewCircuitBreaker(3, 50*time.Millisecond),
+		RetryConfig: RetryConfig{
+			MaxAttempts: 1,
+			BaseDelay:   time.Millisecond,
+			MaxDelay:    time.Millisecond,
+			Jitter:      0,
+		},
+		BankTimeout:    time.Second,
+		MaxTransaction: 25000,
+	})
+
+	tx, err := svc.CreateTransaction(context.Background(), CreateTransactionInput{
+		MerchantID: "m_001",
+		Amount:     100,
+		Currency:   "CAD",
+	})
+	if !errors.Is(err, eventErr) {
+		t.Fatalf("expected event failure, got %v", err)
+	}
+	if tx == nil {
+		t.Fatal("expected transaction to be returned on processing failure")
+	}
+	if tx.Status != domain.TxStatusProcessing {
+		t.Fatalf("expected PROCESSING status, got %s", tx.Status)
+	}
+	if bankClient.calls != 0 {
+		t.Fatalf("expected bank client not to be called, got %d calls", bankClient.calls)
+	}
+	if len(outboxRepo.Events) != 1 {
+		t.Fatalf("expected only created outbox event, got %d", len(outboxRepo.Events))
+	}
+}
+
 func TestRefund_Success(t *testing.T) {
 	svc := newTestService()
 	ctx := context.Background()
@@ -151,6 +350,49 @@ func TestRefund_Success(t *testing.T) {
 	}
 	if refunded.Status != domain.TxStatusRefunded {
 		t.Errorf("expected REFUNDED, got %s", refunded.Status)
+	}
+}
+
+func TestRefund_EmitsOutboxEvent(t *testing.T) {
+	merchantRepo := mock.NewMerchantRepo()
+	txRepo := mock.NewTransactionRepo()
+	eventRepo := mock.NewEventRepo()
+	outboxRepo := mock.NewOutboxRepo()
+
+	svc := NewPaymentService(PaymentServiceConfig{
+		Merchants:      merchantRepo,
+		Transactions:   txRepo,
+		Events:         eventRepo,
+		Outbox:         outboxRepo,
+		Logger:         slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})),
+		BankClient:     &SimulatedBankClient{Latency: time.Millisecond},
+		CircuitBreaker: NewCircuitBreaker(3, 50*time.Millisecond),
+		RetryConfig: RetryConfig{
+			MaxAttempts: 1,
+			BaseDelay:   time.Millisecond,
+			MaxDelay:    time.Millisecond,
+			Jitter:      0,
+		},
+		BankTimeout:    time.Second,
+		MaxTransaction: 25000,
+	})
+
+	tx, err := svc.CreateTransaction(context.Background(), CreateTransactionInput{
+		MerchantID: "m_001",
+		Amount:     200,
+		Currency:   "CAD",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if _, err := svc.RefundTransaction(context.Background(), tx.ID, "customer request"); err != nil {
+		t.Fatalf("refund: %v", err)
+	}
+
+	last := outboxRepo.Events[len(outboxRepo.Events)-1]
+	if last.EventType != "transaction.refunded" {
+		t.Fatalf("expected refunded outbox event, got %s", last.EventType)
 	}
 }
 

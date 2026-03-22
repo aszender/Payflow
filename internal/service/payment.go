@@ -100,6 +100,10 @@ type CreateTransactionInput struct {
 }
 
 func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTransactionInput) (*domain.Transaction, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+
 	log := s.logger.With(
 		"merchant_id", input.MerchantID,
 		"amount", input.Amount,
@@ -111,6 +115,9 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 			return nil, fmt.Errorf("idempotency check: %w", err)
 		}
 		if existing != nil {
+			if !matchesIdempotentRequest(existing, input) {
+				return nil, fmt.Errorf("%w: idempotency key reused with different request", domain.ErrDuplicateTransaction)
+			}
 			log.Info("idempotent request — returning existing transaction", "tx_id", existing.ID)
 			return existing, nil
 		}
@@ -160,7 +167,7 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 	log.Info("transaction created", "tx_id", tx.ID)
 
 	if err := s.processPayment(ctx, tx, log); err != nil {
-		return tx, nil
+		return tx, err
 	}
 
 	return tx, nil
@@ -185,13 +192,16 @@ func (s *PaymentService) createInDBTransaction(ctx context.Context, tx *domain.T
 			return fmt.Errorf("save creation event: %w", err)
 		}
 
-		payload, _ := json.Marshal(map[string]interface{}{
+		payload, err := marshalOutboxPayload(map[string]interface{}{
 			"transaction_id": tx.ID,
 			"merchant_id":    tx.MerchantID,
 			"amount":         tx.Amount,
 			"currency":       tx.Currency,
 			"status":         tx.Status,
 		})
+		if err != nil {
+			return fmt.Errorf("marshal created outbox payload: %w", err)
+		}
 		if err := outboxRepo.Create(ctx, &domain.OutboxEvent{
 			EventType: "transaction.created",
 			Payload:   payload,
@@ -208,44 +218,55 @@ func (s *PaymentService) createWithMocks(ctx context.Context, tx *domain.Transac
 	if err := s.txns.Create(ctx, tx); err != nil {
 		return err
 	}
-	s.events.Create(ctx, &domain.TransactionEvent{
+	if err := s.events.Create(ctx, &domain.TransactionEvent{
 		TransactionID: tx.ID,
 		EventType:     "CREATED",
 		ToStatus:      string(domain.TxStatusPending),
 		CreatedAt:     tx.CreatedAt,
-	})
-	return nil
+	}); err != nil {
+		return fmt.Errorf("save creation event: %w", err)
+	}
+
+	return s.emitOutboxEvent(ctx, "transaction.created", tx, tx.CreatedAt, nil)
 }
 
 func (s *PaymentService) processPayment(ctx context.Context, tx *domain.Transaction, log *slog.Logger) error {
-	if err := s.transition(ctx, tx, domain.TxStatusProcessing); err != nil {
+	if err := contextError(ctx); err != nil {
 		return err
 	}
 
-	bankCtx, cancel := context.WithTimeout(ctx, s.bankTimeout)
+	if err := s.transition(ctx, tx, domain.TxStatusProcessing); err != nil {
+		return fmt.Errorf("set processing status: %w", err)
+	}
+
+	bankCtx, cancel := bankCallContext(ctx, s.bankTimeout)
 	defer cancel()
 
-	err := s.callBank(bankCtx, tx)
+	err := s.callBank(ctx, bankCtx, tx)
 	if err != nil {
 		log.Warn("bank call failed", "tx_id", tx.ID, "error", err)
-		s.transition(ctx, tx, domain.TxStatusFailed)
+		if transitionErr := s.transition(postBankContext(ctx), tx, domain.TxStatusFailed); transitionErr != nil {
+			return errors.Join(err, fmt.Errorf("set failed status: %w", transitionErr))
+		}
 		return err
 	}
 
-	if err := s.transition(ctx, tx, domain.TxStatusCompleted); err != nil {
-		return err
+	stateCtx := postBankContext(ctx)
+
+	if err := s.transition(stateCtx, tx, domain.TxStatusCompleted); err != nil {
+		return fmt.Errorf("set completed status: %w", err)
 	}
 
-	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, tx.Amount); err != nil {
+	if err := s.merchants.UpdateBalance(stateCtx, tx.MerchantID, tx.Amount); err != nil {
 		log.Error("failed to credit merchant", "tx_id", tx.ID, "error", err)
-		return err
+		return fmt.Errorf("credit merchant balance: %w", err)
 	}
 
 	log.Info("transaction completed", "tx_id", tx.ID, "amount", tx.Amount)
 	return nil
 }
 
-func (s *PaymentService) callBank(ctx context.Context, tx *domain.Transaction) error {
+func (s *PaymentService) callBank(parentCtx, bankCtx context.Context, tx *domain.Transaction) error {
 	req := BankChargeRequest{
 		TransactionID: tx.ID,
 		MerchantID:    tx.MerchantID,
@@ -253,15 +274,21 @@ func (s *PaymentService) callBank(ctx context.Context, tx *domain.Transaction) e
 		Currency:      tx.Currency,
 	}
 
-	return s.breaker.Execute(func() error {
-		return Retry(ctx, s.retry, func(ctx context.Context) error {
-			_, err := s.bank.Charge(ctx, req)
+	err := s.breaker.Execute(func() error {
+		return Retry(bankCtx, s.retry, func(attemptCtx context.Context) error {
+			_, err := s.bank.Charge(attemptCtx, req)
 			return err
 		})
 	})
+
+	return normalizeBankError(parentCtx, bankCtx, err)
 }
 
 func (s *PaymentService) RefundTransaction(ctx context.Context, txID, reason string) (*domain.Transaction, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+
 	tx, err := s.txns.GetByID(ctx, txID)
 	if err != nil {
 		return nil, err
@@ -298,7 +325,10 @@ func (s *PaymentService) refundInDBTransaction(ctx context.Context, tx *domain.T
 			return err
 		}
 
-		payload, _ := json.Marshal(map[string]string{"reason": reason})
+		payload, err := marshalOutboxPayload(map[string]string{"reason": reason})
+		if err != nil {
+			return fmt.Errorf("marshal refund payload: %w", err)
+		}
 		if err := eventRepo.Create(ctx, &domain.TransactionEvent{
 			TransactionID: tx.ID,
 			EventType:     "REFUNDED",
@@ -310,13 +340,16 @@ func (s *PaymentService) refundInDBTransaction(ctx context.Context, tx *domain.T
 			return err
 		}
 
-		outboxPayload, _ := json.Marshal(map[string]interface{}{
+		outboxPayload, err := marshalOutboxPayload(map[string]interface{}{
 			"transaction_id": tx.ID,
 			"merchant_id":    tx.MerchantID,
 			"amount":         tx.Amount,
 			"status":         "REFUNDED",
 			"reason":         reason,
 		})
+		if err != nil {
+			return fmt.Errorf("marshal refunded outbox payload: %w", err)
+		}
 		return outboxRepo.Create(ctx, &domain.OutboxEvent{
 			EventType: "transaction.refunded",
 			Payload:   outboxPayload,
@@ -329,17 +362,27 @@ func (s *PaymentService) refundWithMocks(ctx context.Context, tx *domain.Transac
 	if err := s.txns.UpdateStatus(ctx, tx.ID, domain.TxStatusRefunded); err != nil {
 		return err
 	}
+	tx.Status = domain.TxStatusRefunded
 	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, -tx.Amount); err != nil {
 		return err
 	}
-	payload, _ := json.Marshal(map[string]string{"reason": reason})
-	return s.events.Create(ctx, &domain.TransactionEvent{
+	payload, err := marshalOutboxPayload(map[string]string{"reason": reason})
+	if err != nil {
+		return fmt.Errorf("marshal refund payload: %w", err)
+	}
+	if err := s.events.Create(ctx, &domain.TransactionEvent{
 		TransactionID: tx.ID,
 		EventType:     "REFUNDED",
 		FromStatus:    string(domain.TxStatusCompleted),
 		ToStatus:      string(domain.TxStatusRefunded),
 		Payload:       payload,
 		CreatedAt:     time.Now(),
+	}); err != nil {
+		return err
+	}
+
+	return s.emitOutboxEvent(ctx, "transaction.refunded", tx, time.Now(), map[string]interface{}{
+		"reason": reason,
 	})
 }
 
@@ -360,6 +403,10 @@ func (s *PaymentService) GetTransactionHistory(ctx context.Context, txID string)
 }
 
 func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction, to domain.TransactionStatus) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+
 	from := tx.Status
 	if !domain.CanTransition(from, to) {
 		return fmt.Errorf("%w: %s → %s", domain.ErrInvalidTransition, from, to)
@@ -371,13 +418,19 @@ func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction,
 
 	tx.Status = to
 
-	s.events.Create(ctx, &domain.TransactionEvent{
+	if err := s.events.Create(ctx, &domain.TransactionEvent{
 		TransactionID: tx.ID,
 		EventType:     fmt.Sprintf("STATUS_%s", to),
 		FromStatus:    string(from),
 		ToStatus:      string(to),
 		CreatedAt:     time.Now(),
-	})
+	}); err != nil {
+		return fmt.Errorf("record transition event: %w", err)
+	}
+
+	if err := s.emitTransitionOutboxEvent(ctx, tx, to); err != nil {
+		return fmt.Errorf("record transition outbox event: %w", err)
+	}
 
 	return nil
 }
@@ -406,4 +459,105 @@ func isRetryableBankError(err error) bool {
 	return errors.Is(err, domain.ErrBankTimeout) ||
 		errors.Is(err, domain.ErrBankUnavailable) ||
 		errors.Is(err, context.DeadlineExceeded)
+}
+
+func matchesIdempotentRequest(existing *domain.Transaction, input CreateTransactionInput) bool {
+	if existing == nil {
+		return false
+	}
+
+	return existing.MerchantID == input.MerchantID &&
+		existing.Amount == input.Amount &&
+		existing.Currency == input.Currency &&
+		existing.Description == input.Description
+}
+
+func bankCallContext(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func postBankContext(ctx context.Context) context.Context {
+	if ctx == nil {
+		return context.Background()
+	}
+	return context.WithoutCancel(ctx)
+}
+
+func normalizeBankError(parentCtx, bankCtx context.Context, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) && parentCtx != nil && errors.Is(parentCtx.Err(), context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		if parentCtx != nil && errors.Is(parentCtx.Err(), context.DeadlineExceeded) {
+			return context.DeadlineExceeded
+		}
+		if bankCtx != nil && errors.Is(bankCtx.Err(), context.DeadlineExceeded) {
+			return domain.ErrBankTimeout
+		}
+	}
+	return err
+}
+
+func contextError(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Err()
+}
+
+func (s *PaymentService) emitTransitionOutboxEvent(ctx context.Context, tx *domain.Transaction, to domain.TransactionStatus) error {
+	switch to {
+	case domain.TxStatusCompleted:
+		return s.emitOutboxEvent(ctx, "transaction.completed", tx, time.Now(), nil)
+	case domain.TxStatusFailed:
+		return s.emitOutboxEvent(ctx, "transaction.failed", tx, time.Now(), nil)
+	default:
+		return nil
+	}
+}
+
+func (s *PaymentService) emitOutboxEvent(ctx context.Context, eventType string, tx *domain.Transaction, createdAt time.Time, extra map[string]interface{}) error {
+	if s.outbox == nil || tx == nil {
+		return nil
+	}
+
+	payload, err := transactionOutboxPayload(tx, extra)
+	if err != nil {
+		return err
+	}
+
+	return s.outbox.Create(ctx, &domain.OutboxEvent{
+		EventType: eventType,
+		Payload:   payload,
+		CreatedAt: createdAt,
+	})
+}
+
+func transactionOutboxPayload(tx *domain.Transaction, extra map[string]interface{}) (json.RawMessage, error) {
+	payload := map[string]interface{}{
+		"transaction_id": tx.ID,
+		"merchant_id":    tx.MerchantID,
+		"amount":         tx.Amount,
+		"currency":       tx.Currency,
+		"status":         tx.Status,
+	}
+	for key, value := range extra {
+		payload[key] = value
+	}
+
+	return marshalOutboxPayload(payload)
+}
+
+func marshalOutboxPayload(payload interface{}) (json.RawMessage, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return raw, nil
 }
