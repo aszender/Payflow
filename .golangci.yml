@@ -1,15 +1,15 @@
+version: "2"
+
 run:
   timeout: 5m
   tests: false
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - govet
     - staticcheck
     - ineffassign
-
-issues:
-  exclude-use-default: false
-  exclude-dirs:
-    - learn
+  exclusions:
+    paths:
+      - learn/
