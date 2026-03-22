@@ -13,16 +13,13 @@ type DBTX interface {
 	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
 }
 
-
 type MerchantRepository interface {
 	GetByID(ctx context.Context, id string) (*domain.Merchant, error)
 	GetByAPIKey(ctx context.Context, apiKey string) (*domain.Merchant, error)
 	UpdateBalance(ctx context.Context, id string, delta float64) error
 
-	
 	WithTx(tx *sql.Tx) MerchantRepository
 }
-
 
 type TransactionRepository interface {
 	Create(ctx context.Context, tx *domain.Transaction) error
@@ -34,7 +31,6 @@ type TransactionRepository interface {
 	WithTx(tx *sql.Tx) TransactionRepository
 }
 
-
 type EventRepository interface {
 	Create(ctx context.Context, event *domain.TransactionEvent) error
 	ListByTransaction(ctx context.Context, txID string) ([]*domain.TransactionEvent, error)
@@ -44,6 +40,8 @@ type EventRepository interface {
 
 type OutboxRepository interface {
 	Create(ctx context.Context, event *domain.OutboxEvent) error
+	// FetchUnpublished atomically claims a batch of unpublished events for a short lease.
+	// Claimed rows should not be returned again until the lease expires or they are marked published.
 	FetchUnpublished(ctx context.Context, limit int) ([]*domain.OutboxEvent, error)
 	MarkPublished(ctx context.Context, id int64) error
 

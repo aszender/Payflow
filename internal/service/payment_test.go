@@ -319,11 +319,18 @@ func TestCreateTransaction_TransitionEventFailurePropagates(t *testing.T) {
 	if tx == nil {
 		t.Fatal("expected transaction to be returned on processing failure")
 	}
-	if tx.Status != domain.TxStatusProcessing {
-		t.Fatalf("expected PROCESSING status, got %s", tx.Status)
+	if tx.Status != domain.TxStatusPending {
+		t.Fatalf("expected PENDING status after rollback, got %s", tx.Status)
 	}
 	if bankClient.calls != 0 {
 		t.Fatalf("expected bank client not to be called, got %d calls", bankClient.calls)
+	}
+	stored, err := txRepo.GetByID(context.Background(), tx.ID)
+	if err != nil {
+		t.Fatalf("load stored transaction: %v", err)
+	}
+	if stored.Status != domain.TxStatusPending {
+		t.Fatalf("expected stored status PENDING after rollback, got %s", stored.Status)
 	}
 	if len(outboxRepo.Events) != 1 {
 		t.Fatalf("expected only created outbox event, got %d", len(outboxRepo.Events))

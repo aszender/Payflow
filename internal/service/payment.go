@@ -253,16 +253,98 @@ func (s *PaymentService) processPayment(ctx context.Context, tx *domain.Transact
 
 	stateCtx := postBankContext(ctx)
 
-	if err := s.transition(stateCtx, tx, domain.TxStatusCompleted); err != nil {
-		return fmt.Errorf("set completed status: %w", err)
-	}
-
-	if err := s.merchants.UpdateBalance(stateCtx, tx.MerchantID, tx.Amount); err != nil {
-		log.Error("failed to credit merchant", "tx_id", tx.ID, "error", err)
-		return fmt.Errorf("credit merchant balance: %w", err)
+	if err := s.completePayment(stateCtx, tx); err != nil {
+		log.Error("failed to finalize completed payment", "tx_id", tx.ID, "error", err)
+		return err
 	}
 
 	log.Info("transaction completed", "tx_id", tx.ID, "amount", tx.Amount)
+	return nil
+}
+
+func (s *PaymentService) completePayment(ctx context.Context, tx *domain.Transaction) error {
+	if s.db != nil {
+		return s.completeInDBTransaction(ctx, tx)
+	}
+	return s.completeWithMocks(ctx, tx)
+}
+
+func (s *PaymentService) completeInDBTransaction(ctx context.Context, tx *domain.Transaction) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+
+	from := tx.Status
+	to := domain.TxStatusCompleted
+	if !domain.CanTransition(from, to) {
+		return fmt.Errorf("%w: %s → %s", domain.ErrInvalidTransition, from, to)
+	}
+
+	completedAt := time.Now()
+	completedTx := *tx
+	completedTx.Status = to
+
+	err := withTransaction(ctx, s.db, func(dbTx *sql.Tx) error {
+		txnRepo := s.txns.WithTx(dbTx)
+		merchantRepo := s.merchants.WithTx(dbTx)
+		eventRepo := s.events.WithTx(dbTx)
+		outboxRepo := s.outbox.WithTx(dbTx)
+
+		if err := txnRepo.UpdateStatus(ctx, tx.ID, to); err != nil {
+			return fmt.Errorf("set completed status: %w", err)
+		}
+		if err := merchantRepo.UpdateBalance(ctx, tx.MerchantID, tx.Amount); err != nil {
+			return fmt.Errorf("credit merchant balance: %w", err)
+		}
+		if err := eventRepo.Create(ctx, &domain.TransactionEvent{
+			TransactionID: tx.ID,
+			EventType:     fmt.Sprintf("STATUS_%s", to),
+			FromStatus:    string(from),
+			ToStatus:      string(to),
+			CreatedAt:     completedAt,
+		}); err != nil {
+			return fmt.Errorf("record transition event: %w", err)
+		}
+
+		payload, err := transactionOutboxPayload(&completedTx, nil)
+		if err != nil {
+			return fmt.Errorf("marshal completed outbox payload: %w", err)
+		}
+		if err := outboxRepo.Create(ctx, &domain.OutboxEvent{
+			EventType: "transaction.completed",
+			Payload:   payload,
+			CreatedAt: completedAt,
+		}); err != nil {
+			return fmt.Errorf("record transition outbox event: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	tx.Status = to
+	return nil
+}
+
+func (s *PaymentService) completeWithMocks(ctx context.Context, tx *domain.Transaction) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+
+	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, tx.Amount); err != nil {
+		return fmt.Errorf("credit merchant balance: %w", err)
+	}
+
+	if err := s.transition(ctx, tx, domain.TxStatusCompleted); err != nil {
+		rollbackErr := s.merchants.UpdateBalance(ctx, tx.MerchantID, -tx.Amount)
+		if rollbackErr != nil {
+			return errors.Join(err, fmt.Errorf("rollback credited balance: %w", rollbackErr))
+		}
+		return err
+	}
+
 	return nil
 }
 
@@ -416,7 +498,8 @@ func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction,
 		return err
 	}
 
-	tx.Status = to
+	transitionedTx := *tx
+	transitionedTx.Status = to
 
 	if err := s.events.Create(ctx, &domain.TransactionEvent{
 		TransactionID: tx.ID,
@@ -425,14 +508,23 @@ func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction,
 		ToStatus:      string(to),
 		CreatedAt:     time.Now(),
 	}); err != nil {
-		return fmt.Errorf("record transition event: %w", err)
+		return s.rollbackTransition(ctx, tx, from, fmt.Errorf("record transition event: %w", err))
 	}
 
-	if err := s.emitTransitionOutboxEvent(ctx, tx, to); err != nil {
-		return fmt.Errorf("record transition outbox event: %w", err)
+	if err := s.emitTransitionOutboxEvent(ctx, &transitionedTx, to); err != nil {
+		return s.rollbackTransition(ctx, tx, from, fmt.Errorf("record transition outbox event: %w", err))
 	}
 
+	tx.Status = to
 	return nil
+}
+
+func (s *PaymentService) rollbackTransition(ctx context.Context, tx *domain.Transaction, from domain.TransactionStatus, cause error) error {
+	if rollbackErr := s.txns.UpdateStatus(ctx, tx.ID, from); rollbackErr != nil {
+		return errors.Join(cause, fmt.Errorf("rollback status to %s: %w", from, rollbackErr))
+	}
+	tx.Status = from
+	return cause
 }
 
 func withTransaction(ctx context.Context, db *sql.DB, fn func(tx *sql.Tx) error) error {

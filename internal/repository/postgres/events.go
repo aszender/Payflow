@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"time"
 
 	"github.com/aszender/payflow/internal/domain"
 	"github.com/aszender/payflow/internal/repository"
@@ -70,6 +71,8 @@ type OutboxRepo struct {
 	db repository.DBTX
 }
 
+const outboxClaimLease = 30 * time.Second
+
 func NewOutboxRepo(db repository.DBTX) *OutboxRepo {
 	return &OutboxRepo{db: db}
 }
@@ -92,16 +95,24 @@ func (r *OutboxRepo) Create(ctx context.Context, event *domain.OutboxEvent) erro
 
 func (r *OutboxRepo) FetchUnpublished(ctx context.Context, limit int) ([]*domain.OutboxEvent, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, event_type, payload, published, created_at
-		 FROM outbox
-		 WHERE published = FALSE
-		 ORDER BY created_at ASC
-		 LIMIT $1
-		 FOR UPDATE SKIP LOCKED`, // prevents double processing in multi-instance
-		limit,
+		`WITH claimable AS (
+			SELECT id
+			FROM outbox
+			WHERE published = FALSE
+			  AND (published_at IS NULL OR published_at <= NOW())
+			ORDER BY created_at ASC
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE outbox AS o
+		SET published_at = NOW() + ($2 * INTERVAL '1 microsecond')
+		FROM claimable
+		WHERE o.id = claimable.id
+		RETURNING o.id, o.event_type, o.payload, o.published, o.created_at`,
+		limit, outboxClaimLease.Microseconds(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("fetch unpublished: %w", err)
+		return nil, fmt.Errorf("claim unpublished: %w", err)
 	}
 	defer rows.Close()
 

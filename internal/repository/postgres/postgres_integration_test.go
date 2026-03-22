@@ -153,6 +153,7 @@ func TestEventRepo_CreateAndList(t *testing.T) {
 func TestOutboxRepo_CreateFetchAndMarkPublished(t *testing.T) {
 	db := integrationDB(t)
 	repo := NewOutboxRepo(db.DB)
+	otherRepo := NewOutboxRepo(db.DB)
 
 	event := &domain.OutboxEvent{
 		EventType: "transaction.created",
@@ -171,7 +172,33 @@ func TestOutboxRepo_CreateFetchAndMarkPublished(t *testing.T) {
 		t.Fatalf("expected 1 unpublished event, got %d", len(events))
 	}
 
-	if err := repo.MarkPublished(context.Background(), events[0].ID); err != nil {
+	claimedElsewhere, err := otherRepo.FetchUnpublished(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("fetch unpublished from second repo: %v", err)
+	}
+	if len(claimedElsewhere) != 0 {
+		t.Fatalf("expected claimed event to be hidden from second repo, got %d rows", len(claimedElsewhere))
+	}
+
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE outbox SET published_at = NOW() - INTERVAL '1 second' WHERE id = $1`,
+		events[0].ID,
+	); err != nil {
+		t.Fatalf("expire outbox lease: %v", err)
+	}
+
+	reclaimed, err := otherRepo.FetchUnpublished(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("reclaim unpublished after lease expiry: %v", err)
+	}
+	if len(reclaimed) != 1 {
+		t.Fatalf("expected reclaimed event after lease expiry, got %d", len(reclaimed))
+	}
+	if reclaimed[0].ID != events[0].ID {
+		t.Fatalf("expected reclaimed id %d, got %d", events[0].ID, reclaimed[0].ID)
+	}
+
+	if err := repo.MarkPublished(context.Background(), reclaimed[0].ID); err != nil {
 		t.Fatalf("mark published: %v", err)
 	}
 

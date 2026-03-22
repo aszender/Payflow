@@ -115,7 +115,7 @@ func (w *OutboxWorker) processBatch(ctx context.Context) {
 
 	events, err := w.outbox.FetchUnpublished(ctx, w.batchSize)
 	if err != nil {
-		w.logger.Error("fetch unpublished outbox events", "error", err)
+		w.logger.Error("claim unpublished outbox events", "error", err)
 		return
 	}
 	if len(events) == 0 {
