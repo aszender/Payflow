@@ -45,7 +45,7 @@ Designed to demonstrate production-oriented backend architecture: clean layering
              │  Service    │ │   Logger    │ │  Pipeline    │
              └────────────┘ └─────────────┘ └──────────────┘
 
-* Redis, webhooks, and analytics are shown for production reference. Redis is not implemented in this repository. The code here implements the API, PostgreSQL persistence, and Kafka-backed outbox flow.
+* Redis, webhooks, and analytics are shown for production reference. This repository implements the API, PostgreSQL persistence, Kafka-backed outbox flow, and Redis-backed rate limiting/idempotency coordination.
 ```
 
 ## Payment Flow
@@ -86,9 +86,27 @@ Designed to demonstrate production-oriented backend architecture: clean layering
 - Health check endpoint for K8s liveness/readiness probes
 - Request count + active request gauges
 
+## Rate Limiting
+
+PayFlow uses a token bucket rate limiter backed by Redis and Lua so the decision is atomic and shared across instances. Each client key is evaluated against the same distributed state, which keeps enforcement consistent even when the API runs with multiple replicas.
+
+The limiter is intentionally fail-open at the application boundary: if Redis is unavailable, the request is allowed to proceed rather than dropping traffic due to a control-plane dependency.
+
+## Idempotency
+
+Idempotency prevents duplicate execution of payment requests. Redis acts as the coordination layer with `in_progress` and `completed` states, while PostgreSQL remains the source of truth for the transaction itself.
+
+The `in_progress` state blocks concurrent duplicate work, and the `completed` state returns the stored response for repeated requests. TTL-based storage allows safe recovery if the process or Redis node restarts.
+
+## Architecture Notes
+
+Lua keeps the Redis operations atomic, which matters for both token bucket updates and idempotency state transitions. Redis provides distributed consistency for rate limiting and request coordination without moving business correctness out of the database.
+
+Rate limiting fails open to preserve availability. Idempotency uses TTLs and safe recovery semantics so transient Redis loss does not corrupt payment correctness, and PostgreSQL remains the durable record of the final result.
+
 ## Tech Stack
 
-Go 1.25 · chi · PostgreSQL 16 · Kafka · Docker · basic Kubernetes manifests
+Go 1.25 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · basic Kubernetes manifests
 
 Application metrics exposed via `/metrics` endpoint
 
@@ -119,8 +137,9 @@ curl http://localhost:8080/api/v1/merchants/m_001/balance \
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| `GET` | `/health` | No | Liveness + readiness (DB ping) |
-| `GET` | `/metrics` | No | p50/p95/p99 latency, request counts |
+| `GET` | `/health` | No | Health status with database check |
+| `GET` | `/ready` | No | Readiness probe |
+| `GET` | `/metrics` | No | Prometheus metrics endpoint |
 | `POST` | `/api/v1/transactions` | Bearer | Create payment |
 | `GET` | `/api/v1/transactions/{id}` | Bearer | Get transaction |
 | `POST` | `/api/v1/transactions/{id}/refund` | Bearer | Refund (atomic reverse) |
@@ -266,7 +285,12 @@ payflow/
 │   │   ├── handlers.go               ← HTTP handlers, error mapping
 │   │   └── handler_test.go           ← endpoint tests with httptest
 │   ├── middleware/
-│   │   └── middleware.go             ← auth, logging, rate limit, recovery, CORS
+│   │   ├── middleware.go             ← auth, logging, rate limit, recovery, CORS
+│   │   ├── redis_rate_limiter.go     ← Redis token bucket limiter
+│   │   ├── idempotency_store.go      ← Redis idempotency coordination
+│   │   ├── idempotency_middleware.go ← cached replay + in-progress protection
+│   │   ├── rate_limit.lua            ← atomic token bucket script
+│   │   └── idempotency_check.lua     ← atomic idempotency check script
 │   ├── metrics/
 │   │   └── metrics.go                ← counters, histograms, gauges
 │   ├── config/
@@ -276,7 +300,7 @@ payflow/
 │       └── patterns_test.go          ← concurrency tests with -race
 ├── migrations/                       ← 6 manual SQL migration files (idempotent, ordered)
 ├── Dockerfile                        ← multi-stage container build
-├── docker-compose.yml                ← PostgreSQL + Kafka + Zookeeper
+├── docker-compose.yml                ← PostgreSQL + Kafka + Zookeeper + Redis
 ├── Makefile
 └── go.mod
 ```
@@ -315,7 +339,7 @@ closes.
 | Architecture | Hexagonal | Layered MVC | Repository interfaces enable testing without DB. Swap PostgreSQL for another persistence layer without touching business logic |
 | Bank call | Sync + outbox | Fully async | Client gets immediate response. Outbox preserves downstream delivery intent even if Kafka is temporarily unavailable |
 | Testing | Mocks + integration tests | Testcontainers-only | Unit tests stay fast, and PostgreSQL integration tests run in CI |
-| Rate limiting | In-memory token bucket | Redis-based | Simpler for single instance. Production would use Redis for global enforcement across pods |
+| Rate limiting | Redis token bucket + Lua | In-memory token bucket | Shared atomic limits across instances without changing business logic |
 
 ## Testing
 
@@ -343,7 +367,7 @@ Things this project demonstrates vs. what a production system would add:
 | This Project | Production |
 |-------------|------------|
 | Simulated bank client by default | Real bank partner API integration |
-| In-memory rate limiter | Redis-backed global rate limiter |
+| Redis-backed global rate limiter | More granular route- and merchant-level policies |
 | slog JSON logging | OpenTelemetry + Datadog/CloudWatch |
 | Single PostgreSQL | Primary + read replicas + PgBouncer |
 | Basic API key auth | OAuth2 + mTLS + PCI DSS compliance |
