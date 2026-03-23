@@ -20,6 +20,11 @@ type Config struct {
 	DBMaxIdleConns int
 	DBConnMaxLife  time.Duration
 
+	// Redis
+	RedisAddr     string
+	RedisPassword string
+	RedisDB       int
+
 	// Kafka
 	KafkaBrokers []string
 	KafkaTopic   string
@@ -56,6 +61,10 @@ func Load() (*Config, error) {
 		DBMaxOpenConns: getEnvInt("DB_MAX_OPEN_CONNS", 25),
 		DBMaxIdleConns: getEnvInt("DB_MAX_IDLE_CONNS", 5),
 		DBConnMaxLife:  time.Duration(getEnvInt("DB_CONN_MAX_LIFE_MIN", 5)) * time.Minute,
+
+		RedisAddr:     getEnv("REDIS_ADDR", ""),
+		RedisPassword: getEnv("REDIS_PASSWORD", ""),
+		RedisDB:       getEnvInt("REDIS_DB", 0),
 
 		KafkaBrokers: []string{getEnv("KAFKA_BROKERS", "localhost:9092")},
 		KafkaTopic:   getEnv("KAFKA_TOPIC", "payment-events"),

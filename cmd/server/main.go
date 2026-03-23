@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/aszender/payflow/internal/config"
 	"github.com/aszender/payflow/internal/handler"
@@ -59,6 +60,22 @@ func main() {
 	txRepo := postgres.NewTransactionRepo(db.DB)
 	eventRepo := postgres.NewEventRepo(db.DB)
 	outboxRepo := postgres.NewOutboxRepo(db.DB)
+
+	var redisClient *redis.Client
+	if cfg.RedisAddr != "" {
+		redisClient = redis.NewClient(&redis.Options{
+			Addr:     cfg.RedisAddr,
+			Password: cfg.RedisPassword,
+			DB:       cfg.RedisDB,
+		})
+		defer redisClient.Close()
+
+		if err := redisClient.Ping(ctx).Err(); err != nil {
+			logger.Warn("redis ping failed; middleware will degrade gracefully", "error", err)
+		} else {
+			logger.Info("redis connected", "addr", cfg.RedisAddr)
+		}
+	}
 
 	// --- Metrics ---
 	appMetrics := metrics.New()
@@ -116,7 +133,11 @@ func main() {
 	healthHandler := handler.NewHealthHandler(db, version)
 
 	// --- Rate Limiter ---
-	limiter := middleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst)
+	var limiter middleware.RequestLimiter = middleware.NewRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst)
+	if redisClient != nil {
+		limiter = middleware.NewRedisRateLimiter(redisClient, float64(cfg.RateLimitRPS), float64(cfg.RateLimitBurst))
+	}
+	idempotencyStore := middleware.NewIdempotencyStore(redisClient)
 
 	// --- Router ---
 	r := chi.NewRouter()
@@ -139,7 +160,7 @@ func main() {
 		r.Use(middleware.APIKeyAuth(merchantRepo, logger))
 
 		r.Route("/transactions", func(r chi.Router) {
-			r.Post("/", txHandler.Create)
+			r.With(middleware.Idempotency(idempotencyStore)).Post("/", txHandler.Create)
 			r.Get("/{id}", txHandler.GetByID)
 			r.Post("/{id}/refund", txHandler.Refund)
 			r.Get("/{id}/events", txHandler.GetEvents)

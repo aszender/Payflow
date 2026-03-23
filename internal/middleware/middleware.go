@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -162,6 +163,10 @@ type bucket struct {
 	lastCheck time.Time
 }
 
+type RequestLimiter interface {
+	Allow(ctx context.Context, key string) (bool, error)
+}
+
 func NewRateLimiter(rps, burst int) *RateLimiter {
 	return &RateLimiter{
 		buckets:  make(map[string]*bucket),
@@ -171,7 +176,7 @@ func NewRateLimiter(rps, burst int) *RateLimiter {
 	}
 }
 
-func (rl *RateLimiter) Allow(key string) bool {
+func (rl *RateLimiter) Allow(_ context.Context, key string) (bool, error) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 
@@ -190,16 +195,27 @@ func (rl *RateLimiter) Allow(key string) bool {
 	b.lastCheck = now
 
 	if b.tokens < 1 {
-		return false
+		return false, nil
 	}
 	b.tokens--
-	return true
+	return true, nil
 }
 
-func RateLimit(limiter *RateLimiter) func(http.Handler) http.Handler {
+func RateLimit(limiter RequestLimiter) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if !limiter.Allow(r.RemoteAddr) {
+			if limiter == nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			allowed, err := limiter.Allow(r.Context(), clientIDFromRequest(r))
+			if err != nil || allowed {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if !allowed {
 				w.Header().Set("Retry-After", "1")
 				writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "too many requests")
 				return
@@ -207,6 +223,26 @@ func RateLimit(limiter *RateLimiter) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func clientIDFromRequest(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		if ip := strings.TrimSpace(parts[0]); ip != "" {
+			return ip
+		}
+	}
+
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err == nil && host != "" {
+		return host
+	}
+
+	if addr := strings.TrimSpace(r.RemoteAddr); addr != "" {
+		return addr
+	}
+
+	return "unknown"
 }
 
 func Recovery(logger *slog.Logger) func(http.Handler) http.Handler {
@@ -232,7 +268,7 @@ func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-Idempotency-Key")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, X-Idempotency-Key, Idempotency-Key")
 		w.Header().Set("Access-Control-Max-Age", "86400")
 
 		if r.Method == http.MethodOptions {
