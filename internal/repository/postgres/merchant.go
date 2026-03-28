@@ -22,6 +22,9 @@ func (r *MerchantRepo) WithTx(tx *sql.Tx) repository.MerchantRepository {
 }
 
 func (r *MerchantRepo) GetByID(ctx context.Context, id string) (*domain.Merchant, error) {
+	ctx, span := tracer().Start(ctx, "MerchantRepo.GetByID")
+	defer span.End()
+
 	m := &domain.Merchant{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, name, api_key, balance_cents, currency, status, created_at, updated_at
@@ -29,15 +32,22 @@ func (r *MerchantRepo) GetByID(ctx context.Context, id string) (*domain.Merchant
 	).Scan(&m.ID, &m.Name, &m.APIKey, &m.BalanceCents, &m.Currency, &m.Status, &m.CreatedAt, &m.UpdatedAt)
 
 	if err == sql.ErrNoRows {
-		return nil, domain.ErrMerchantNotFound
+		err := domain.ErrMerchantNotFound
+		recordSpanError(span, err)
+		return nil, err
 	}
 	if err != nil {
-		return nil, fmt.Errorf("query merchant %s: %w", id, err)
+		err := fmt.Errorf("query merchant %s: %w", id, err)
+		recordSpanError(span, err)
+		return nil, err
 	}
 	return m, nil
 }
 
 func (r *MerchantRepo) GetByAPIKey(ctx context.Context, apiKey string) (*domain.Merchant, error) {
+	ctx, span := tracer().Start(ctx, "MerchantRepo.GetByAPIKey")
+	defer span.End()
+
 	m := &domain.Merchant{}
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, name, api_key, balance_cents, currency, status, created_at, updated_at
@@ -45,15 +55,22 @@ func (r *MerchantRepo) GetByAPIKey(ctx context.Context, apiKey string) (*domain.
 	).Scan(&m.ID, &m.Name, &m.APIKey, &m.BalanceCents, &m.Currency, &m.Status, &m.CreatedAt, &m.UpdatedAt)
 
 	if err == sql.ErrNoRows {
-		return nil, domain.ErrMerchantNotFound
+		err := domain.ErrMerchantNotFound
+		recordSpanError(span, err)
+		return nil, err
 	}
 	if err != nil {
-		return nil, fmt.Errorf("query merchant by api_key: %w", err)
+		err := fmt.Errorf("query merchant by api_key: %w", err)
+		recordSpanError(span, err)
+		return nil, err
 	}
 	return m, nil
 }
 
 func (r *MerchantRepo) UpdateBalance(ctx context.Context, id string, delta int64) error {
+	ctx, span := tracer().Start(ctx, "MerchantRepo.UpdateBalance")
+	defer span.End()
+
 	result, err := r.db.ExecContext(ctx,
 		`UPDATE merchants
 		 SET balance_cents = balance_cents + $1, updated_at = NOW()
@@ -61,17 +78,22 @@ func (r *MerchantRepo) UpdateBalance(ctx context.Context, id string, delta int64
 		delta, id,
 	)
 	if err != nil {
-		return fmt.Errorf("update balance for %s: %w", id, err)
+		err := fmt.Errorf("update balance for %s: %w", id, err)
+		recordSpanError(span, err)
+		return err
 	}
 
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
 		// Could be not found OR insufficient funds
-		_, err := r.GetByID(ctx, id)
-		if err != nil {
-			return err // merchant not found
+		_, lookupErr := r.GetByID(ctx, id)
+		if lookupErr != nil {
+			recordSpanError(span, lookupErr)
+			return lookupErr // merchant not found
 		}
-		return domain.ErrInsufficientFunds
+		insufficientFundsErr := domain.ErrInsufficientFunds
+		recordSpanError(span, insufficientFundsErr)
+		return insufficientFundsErr
 	}
 	return nil
 }

@@ -19,11 +19,14 @@ import (
 	"github.com/aszender/payflow/internal/middleware"
 	"github.com/aszender/payflow/internal/repository/postgres"
 	"github.com/aszender/payflow/internal/service"
+	"github.com/aszender/payflow/internal/telemetry"
 )
 
 const version = "1.0.0"
 
 func main() {
+	ctx := context.Background()
+
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
@@ -39,8 +42,25 @@ func main() {
 		logger.Info("starting in production mode")
 	}
 
+	tracingShutdown, err := telemetry.SetupTracing(ctx, telemetry.TraceConfig{
+		Enabled:      cfg.TracingEnabled,
+		ServiceName:  cfg.TracingServiceName,
+		OTLPEndpoint: cfg.TracingOTLPEndpoint,
+		OTLPInsecure: cfg.TracingOTLPInsecure,
+	})
+	if err != nil {
+		logger.Error("failed to initialize tracing", "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := tracingShutdown(shutdownCtx); err != nil {
+			logger.Warn("tracing shutdown failed", "error", err)
+		}
+	}()
+
 	// --- Database ---
-	ctx := context.Background()
 	db, err := postgres.Connect(ctx, cfg.DatabaseURL, cfg.DBMaxOpenConns, cfg.DBMaxIdleConns, cfg.DBConnMaxLife)
 	if err != nil {
 		logger.Error("database connection failed", "error", err)
@@ -145,6 +165,7 @@ func main() {
 	// Global middleware (applied to ALL routes)
 	r.Use(middleware.Recovery(logger))
 	r.Use(middleware.RequestID)
+	r.Use(middleware.Tracing(cfg.TracingServiceName))
 	r.Use(middleware.Logging(logger))
 	r.Use(middleware.MetricsMiddleware(appMetrics))
 	r.Use(middleware.CORS)

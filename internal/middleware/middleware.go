@@ -11,6 +11,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/aszender/payflow/internal/domain"
 	"github.com/aszender/payflow/internal/metrics"
 	"github.com/aszender/payflow/internal/repository"
@@ -66,6 +73,39 @@ func GetRequestID(ctx context.Context) string {
 func GetMerchant(ctx context.Context) (*domain.Merchant, bool) {
 	merchant, ok := ctx.Value(MerchantKey).(*domain.Merchant)
 	return merchant, ok && merchant != nil
+}
+
+func Tracing(serviceName string) func(http.Handler) http.Handler {
+	tracer := otel.Tracer(serviceName + "/http")
+	propagator := otel.GetTextMapPropagator()
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := propagator.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+			spanName := r.Method + " " + r.URL.Path
+			ctx, span := tracer.Start(ctx, spanName, trace.WithSpanKind(trace.SpanKindServer))
+
+			wrapped := newResponseWriter(w)
+			next.ServeHTTP(wrapped, r.WithContext(ctx))
+
+			if routePattern := chi.RouteContext(r.Context()).RoutePattern(); routePattern != "" {
+				span.SetName(r.Method + " " + routePattern)
+				span.SetAttributes(attribute.String("http.route", routePattern))
+			}
+
+			span.SetAttributes(
+				attribute.String("http.method", r.Method),
+				attribute.String("http.target", r.URL.Path),
+				attribute.Int("http.status_code", wrapped.statusCode),
+				attribute.String("request.id", GetRequestID(r.Context())),
+			)
+			if wrapped.statusCode >= http.StatusInternalServerError {
+				span.SetStatus(codes.Error, http.StatusText(wrapped.statusCode))
+			}
+
+			span.End()
+		})
+	}
 }
 
 func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
