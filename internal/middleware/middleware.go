@@ -21,6 +21,7 @@ import (
 	"github.com/aszender/payflow/internal/domain"
 	"github.com/aszender/payflow/internal/metrics"
 	"github.com/aszender/payflow/internal/repository"
+
 )
 
 type contextKey string
@@ -137,18 +138,18 @@ func Logging(logger *slog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-func MetricsMiddleware(m *metrics.Metrics) func(http.Handler) http.Handler {
+func MetricsMiddleware() func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			m.IncrementActive()
-			defer m.DecrementActive()
+			metrics.IncrementActive()
+			defer metrics.DecrementActive()
 
 			start := time.Now()
 			wrapped := newResponseWriter(w)
 
 			next.ServeHTTP(wrapped, r)
 
-			m.RecordRequest(r.Method, r.URL.Path, wrapped.statusCode, time.Since(start))
+			metrics.RecordRequest(r.Method, r.URL.Path, wrapped.statusCode, time.Since(start))
 		})
 	}
 }

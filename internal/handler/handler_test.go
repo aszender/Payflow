@@ -13,7 +13,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
-	"github.com/aszender/payflow/internal/metrics"
 	"github.com/aszender/payflow/internal/middleware"
 	"github.com/aszender/payflow/internal/repository/mock"
 	"github.com/aszender/payflow/internal/service"
@@ -25,7 +24,6 @@ type handlerTestSuite struct {
 
 func newHandlerTestSuite() *handlerTestSuite {
 	logger := slog.New(slog.NewTextHandler(bytes.NewBuffer(nil), &slog.HandlerOptions{Level: slog.LevelError}))
-	appMetrics := metrics.New()
 	merchantRepo := mock.NewMerchantRepo()
 
 	svc := service.NewPaymentService(service.PaymentServiceConfig{
@@ -54,7 +52,7 @@ func newHandlerTestSuite() *handlerTestSuite {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recovery(logger))
 	r.Use(middleware.Logging(logger))
-	r.Use(middleware.MetricsMiddleware(appMetrics))
+	r.Use(middleware.MetricsMiddleware())
 	r.Use(middleware.CORS)
 	r.Use(middleware.RateLimit(middleware.NewRateLimiter(100, 100)))
 

@@ -12,7 +12,6 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/aszender/payflow/internal/domain"
-	"github.com/aszender/payflow/internal/metrics"
 	"github.com/aszender/payflow/internal/middleware"
 	"github.com/aszender/payflow/internal/service"
 )
@@ -322,48 +321,3 @@ func (h *HealthHandler) Ready(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-type metricsSnapshotter interface {
-	GetSnapshot() metrics.Snapshot
-}
-
-type MetricsHandler struct {
-	m metricsSnapshotter
-}
-
-func NewMetricsHandler(m metricsSnapshotter) *MetricsHandler {
-	return &MetricsHandler{m: m}
-}
-
-func (h *MetricsHandler) Get(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	if h.m == nil {
-		json.NewEncoder(w).Encode(map[string]interface{}{})
-		return
-	}
-	json.NewEncoder(w).Encode(h.m.GetSnapshot())
-}
-
-func SetupRoutes(
-	r *chi.Mux,
-	txHandler *TransactionHandler,
-	merchantHandler *MerchantHandler,
-	healthHandler *HealthHandler,
-	metricsHandler *MetricsHandler,
-	merchantRepo interface {
-		GetByAPIKey(ctx interface{}, key string) (interface{}, error)
-	},
-) {
-	r.Route("/api/v1", func(r chi.Router) {
-		r.Route("/transactions", func(r chi.Router) {
-			r.Post("/", txHandler.Create)
-			r.Get("/{id}", txHandler.GetByID)
-			r.Post("/{id}/refund", txHandler.Refund)
-			r.Get("/{id}/events", txHandler.GetEvents)
-		})
-		r.Route("/merchants", func(r chi.Router) {
-			r.Get("/{id}/balance", merchantHandler.GetBalance)
-			r.Get("/{id}/transactions", txHandler.ListByMerchant)
-		})
-	})
-}

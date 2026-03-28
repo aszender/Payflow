@@ -15,7 +15,6 @@ import (
 
 	"github.com/aszender/payflow/internal/config"
 	"github.com/aszender/payflow/internal/handler"
-	"github.com/aszender/payflow/internal/metrics"
 	"github.com/aszender/payflow/internal/middleware"
 	"github.com/aszender/payflow/internal/repository/postgres"
 	"github.com/aszender/payflow/internal/service"
@@ -97,9 +96,6 @@ func main() {
 		}
 	}
 
-	// --- Metrics ---
-	appMetrics := metrics.New()
-
 	// --- Service ---
 	bankClient := service.BankClient(&service.SimulatedBankClient{Latency: 150 * time.Millisecond})
 	if cfg.BankAPIURL != "" {
@@ -167,7 +163,7 @@ func main() {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Tracing(cfg.TracingServiceName))
 	r.Use(middleware.Logging(logger))
-	r.Use(middleware.MetricsMiddleware(appMetrics))
+	r.Use(middleware.MetricsMiddleware())
 	r.Use(middleware.CORS)
 	r.Use(middleware.RateLimit(limiter))
 

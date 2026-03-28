@@ -11,9 +11,9 @@ Designed to demonstrate production-oriented backend architecture: clean layering
 - Circuit breaker + retry with exponential backoff and jitter
 - Idempotent payment processing (app + DB UNIQUE constraint)
 - State machine with full audit trail
-- Structured logging + p50/p95/p99 metrics
-- Prometheus metrics endpoint (runtime + application metrics)
-- OpenTelemetry distributed tracing (OTLP export)
+- Structured JSON logging (slog) with request ID correlation
+- Prometheus metrics — application (`http_requests_total`, `http_request_duration_seconds`, `http_active_requests`) + Go runtime; exposed at `GET /metrics`
+- OpenTelemetry distributed tracing (OTLP export, no-op when disabled)
 - Dockerized deployment
 
 ## Architecture
@@ -84,11 +84,9 @@ Designed to demonstrate production-oriented backend architecture: clean layering
 
 **Observability**
 - Structured JSON logging (slog) with request ID correlation
-- p50/p95/p99 latency histograms per endpoint (in-memory, custom metrics struct)
-- Prometheus metrics at `GET /metrics` via `promhttp.Handler()` — exposes Go runtime metrics (GC, goroutines, memory, CPU) in Prometheus text format, ready for scraping
+- Prometheus metrics at `GET /metrics` — `http_requests_total`, `http_request_duration_seconds` (histogram with p50/p95/p99), `http_active_requests`, plus Go runtime metrics (GC, goroutines, memory); all scraped by a single `promhttp.Handler()`
 - OpenTelemetry distributed tracing — OTLP HTTP export to any compatible backend (Jaeger, Grafana Tempo); enabled via environment variables
 - Health check endpoint for K8s liveness/readiness probes
-- Request count + active request gauges
 
 ## Rate Limiting
 
@@ -205,44 +203,6 @@ curl -X POST http://localhost:8080/api/v1/transactions \
 }
 ```
 
-## API Examples
-
-POST `/payments`
-
-Request:
-
-```json
-{
-  "merchant_id": "m_123",
-  "amount": 100.50,
-  "currency": "USD"
-}
-```
-
-Response:
-
-```json
-{
-  "success": true,
-  "data": {
-    "transaction_id": "tx_456",
-    "status": "approved"
-  }
-}
-```
-
-Error example:
-
-```json
-{
-  "success": false,
-  "error": {
-    "code": "AMOUNT_EXCEEDS_LIMIT",
-    "message": "amount exceeds limit"
-  }
-}
-```
-
 ## API Contract
 
 The HTTP contract is documented in `api/openapi.yaml`.
@@ -264,20 +224,17 @@ The example file includes:
 
 ## Metrics
 
-PayFlow exposes two layers of metrics:
+`GET /metrics` is served by `promhttp.Handler()` and exposes everything in Prometheus text format — no extra configuration required.
 
-**Prometheus — `GET /metrics`**
-Served by `promhttp.Handler()` from `github.com/prometheus/client_golang`. Returns Go runtime metrics in Prometheus text format, ready for scraping:
-- `go_goroutines` — current goroutine count
-- `go_gc_duration_seconds` — GC pause durations
-- `go_memstats_alloc_bytes` — heap in use
-- `process_cpu_seconds_total` — CPU time consumed
-- `process_open_fds` — open file descriptors
+**Application metrics** (registered via `promauto` in `internal/metrics/metrics.go`):
+- `http_requests_total` — counter by method, path, status code
+- `http_request_duration_seconds` — histogram with fixed buckets; query p99 via `histogram_quantile(0.99, rate(...))`
+- `http_active_requests` — gauge of in-flight requests
 
-No configuration required. Point a Prometheus server at `http://<host>:8080/metrics` and the metrics appear automatically.
+**Go runtime metrics** (auto-registered by the client library):
+- `go_goroutines`, `go_gc_duration_seconds`, `go_memstats_alloc_bytes`, `process_cpu_seconds_total`, and more
 
-**Application metrics (in-memory)**
-A custom `internal/metrics/metrics.go` struct tracks request counts by method/path/status, p50/p95/p99 latency per endpoint, active in-flight requests, and transaction counts by outcome. Populated by `MetricsMiddleware` applied globally to all routes.
+To store and visualize: point a Prometheus server at `http://<host>:8080/metrics`. To query, use PromQL. To alert, use Alertmanager. None of these are required to run the app — `curl /metrics` works standalone.
 
 ## Tracing
 
