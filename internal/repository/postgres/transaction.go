@@ -22,6 +22,9 @@ func (r *TransactionRepo) WithTx(tx *sql.Tx) repository.TransactionRepository {
 }
 
 func (r *TransactionRepo) Create(ctx context.Context, t *domain.Transaction) error {
+	ctx, span := tracer().Start(ctx, "TransactionRepo.Create")
+	defer span.End()
+
 	metadata := t.Metadata
 	if len(metadata) == 0 {
 		metadata = []byte(`{}`)
@@ -36,12 +39,17 @@ func (r *TransactionRepo) Create(ctx context.Context, t *domain.Transaction) err
 		t.CreatedAt, t.UpdatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("insert transaction: %w", err)
+		err := fmt.Errorf("insert transaction: %w", err)
+		recordSpanError(span, err)
+		return err
 	}
 	return nil
 }
 
 func (r *TransactionRepo) GetByID(ctx context.Context, id string) (*domain.Transaction, error) {
+	ctx, span := tracer().Start(ctx, "TransactionRepo.GetByID")
+	defer span.End()
+
 	t := &domain.Transaction{}
 	var idempKey, desc sql.NullString
 	err := r.db.QueryRowContext(ctx,
@@ -52,10 +60,14 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id string) (*domain.Trans
 		&idempKey, &desc, &t.Metadata, &t.CreatedAt, &t.UpdatedAt)
 
 	if err == sql.ErrNoRows {
-		return nil, domain.ErrTransactionNotFound
+		err := domain.ErrTransactionNotFound
+		recordSpanError(span, err)
+		return nil, err
 	}
 	if err != nil {
-		return nil, fmt.Errorf("query transaction %s: %w", id, err)
+		err := fmt.Errorf("query transaction %s: %w", id, err)
+		recordSpanError(span, err)
+		return nil, err
 	}
 	if idempKey.Valid {
 		t.IdempotencyKey = idempKey.String
@@ -67,6 +79,9 @@ func (r *TransactionRepo) GetByID(ctx context.Context, id string) (*domain.Trans
 }
 
 func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, key string) (*domain.Transaction, error) {
+	ctx, span := tracer().Start(ctx, "TransactionRepo.GetByIdempotencyKey")
+	defer span.End()
+
 	t := &domain.Transaction{}
 	var idempKey, desc sql.NullString
 	err := r.db.QueryRowContext(ctx,
@@ -80,7 +95,9 @@ func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, key string) (
 		return nil, nil // not found is OK — means it's a new request
 	}
 	if err != nil {
-		return nil, fmt.Errorf("query by idempotency key: %w", err)
+		err := fmt.Errorf("query by idempotency key: %w", err)
+		recordSpanError(span, err)
+		return nil, err
 	}
 	if idempKey.Valid {
 		t.IdempotencyKey = idempKey.String
@@ -92,28 +109,40 @@ func (r *TransactionRepo) GetByIdempotencyKey(ctx context.Context, key string) (
 }
 
 func (r *TransactionRepo) UpdateStatus(ctx context.Context, id string, status domain.TransactionStatus) error {
+	ctx, span := tracer().Start(ctx, "TransactionRepo.UpdateStatus")
+	defer span.End()
+
 	result, err := r.db.ExecContext(ctx,
 		`UPDATE transactions SET status = $1, updated_at = NOW() WHERE id = $2`,
 		status, id,
 	)
 	if err != nil {
-		return fmt.Errorf("update transaction status: %w", err)
+		err := fmt.Errorf("update transaction status: %w", err)
+		recordSpanError(span, err)
+		return err
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		return domain.ErrTransactionNotFound
+		err := domain.ErrTransactionNotFound
+		recordSpanError(span, err)
+		return err
 	}
 	return nil
 }
 
 func (r *TransactionRepo) ListByMerchant(ctx context.Context, merchantID string, params domain.ListParams) ([]*domain.Transaction, int, error) {
+	ctx, span := tracer().Start(ctx, "TransactionRepo.ListByMerchant")
+	defer span.End()
+
 	// Get total count
 	var total int
 	err := r.db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM transactions WHERE merchant_id = $1`, merchantID,
 	).Scan(&total)
 	if err != nil {
-		return nil, 0, fmt.Errorf("count transactions: %w", err)
+		err := fmt.Errorf("count transactions: %w", err)
+		recordSpanError(span, err)
+		return nil, 0, err
 	}
 
 	// Get page
@@ -127,7 +156,9 @@ func (r *TransactionRepo) ListByMerchant(ctx context.Context, merchantID string,
 		merchantID, params.Limit, params.Offset,
 	)
 	if err != nil {
-		return nil, 0, fmt.Errorf("list transactions: %w", err)
+		err := fmt.Errorf("list transactions: %w", err)
+		recordSpanError(span, err)
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -148,6 +179,7 @@ func (r *TransactionRepo) ListByMerchant(ctx context.Context, merchantID string,
 		transactions = append(transactions, t)
 	}
 	if err := rows.Err(); err != nil {
+		recordSpanError(span, err)
 		return nil, 0, fmt.Errorf("iterate transactions: %w", err)
 	}
 	return transactions, total, nil

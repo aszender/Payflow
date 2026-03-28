@@ -25,6 +25,9 @@ func (r *EventRepo) WithTx(tx *sql.Tx) repository.EventRepository {
 }
 
 func (r *EventRepo) Create(ctx context.Context, event *domain.TransactionEvent) error {
+	ctx, span := tracer().Start(ctx, "EventRepo.Create")
+	defer span.End()
+
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO transaction_events
 			(transaction_id, event_type, from_status, to_status, payload, created_at)
@@ -34,12 +37,17 @@ func (r *EventRepo) Create(ctx context.Context, event *domain.TransactionEvent) 
 		event.Payload, event.CreatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("insert event: %w", err)
+		err := fmt.Errorf("insert event: %w", err)
+		recordSpanError(span, err)
+		return err
 	}
 	return nil
 }
 
 func (r *EventRepo) ListByTransaction(ctx context.Context, txID string) ([]*domain.TransactionEvent, error) {
+	ctx, span := tracer().Start(ctx, "EventRepo.ListByTransaction")
+	defer span.End()
+
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT id, transaction_id, event_type, 
 				COALESCE(from_status,''), COALESCE(to_status,''),
@@ -49,7 +57,9 @@ func (r *EventRepo) ListByTransaction(ctx context.Context, txID string) ([]*doma
 		 ORDER BY created_at ASC`, txID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("list events for tx %s: %w", txID, err)
+		err := fmt.Errorf("list events for tx %s: %w", txID, err)
+		recordSpanError(span, err)
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -62,7 +72,11 @@ func (r *EventRepo) ListByTransaction(ctx context.Context, txID string) ([]*doma
 		}
 		events = append(events, e)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		recordSpanError(span, err)
+		return nil, err
+	}
+	return events, nil
 }
 
 // --- Outbox Repository ---
@@ -82,18 +96,26 @@ func (r *OutboxRepo) WithTx(tx *sql.Tx) repository.OutboxRepository {
 }
 
 func (r *OutboxRepo) Create(ctx context.Context, event *domain.OutboxEvent) error {
+	ctx, span := tracer().Start(ctx, "OutboxRepo.Create")
+	defer span.End()
+
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO outbox (event_type, payload, published, created_at)
 		 VALUES ($1, $2, FALSE, $3)`,
 		event.EventType, event.Payload, event.CreatedAt,
 	)
 	if err != nil {
-		return fmt.Errorf("insert outbox event: %w", err)
+		err := fmt.Errorf("insert outbox event: %w", err)
+		recordSpanError(span, err)
+		return err
 	}
 	return nil
 }
 
 func (r *OutboxRepo) FetchUnpublished(ctx context.Context, limit int) ([]*domain.OutboxEvent, error) {
+	ctx, span := tracer().Start(ctx, "OutboxRepo.FetchUnpublished")
+	defer span.End()
+
 	rows, err := r.db.QueryContext(ctx,
 		`WITH claimable AS (
 			SELECT id
@@ -112,7 +134,9 @@ func (r *OutboxRepo) FetchUnpublished(ctx context.Context, limit int) ([]*domain
 		limit, outboxClaimLease.Microseconds(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("claim unpublished: %w", err)
+		err := fmt.Errorf("claim unpublished: %w", err)
+		recordSpanError(span, err)
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -124,15 +148,24 @@ func (r *OutboxRepo) FetchUnpublished(ctx context.Context, limit int) ([]*domain
 		}
 		events = append(events, e)
 	}
-	return events, rows.Err()
+	if err := rows.Err(); err != nil {
+		recordSpanError(span, err)
+		return nil, err
+	}
+	return events, nil
 }
 
 func (r *OutboxRepo) MarkPublished(ctx context.Context, id int64) error {
+	ctx, span := tracer().Start(ctx, "OutboxRepo.MarkPublished")
+	defer span.End()
+
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE outbox SET published = TRUE, published_at = NOW() WHERE id = $1`, id,
 	)
 	if err != nil {
-		return fmt.Errorf("mark published %d: %w", id, err)
+		err := fmt.Errorf("mark published %d: %w", id, err)
+		recordSpanError(span, err)
+		return err
 	}
 	return nil
 }

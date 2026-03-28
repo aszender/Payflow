@@ -13,6 +13,9 @@ import (
 
 	"github.com/aszender/payflow/internal/domain"
 	"github.com/aszender/payflow/internal/repository"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 const DefaultMaxTransactionCents = 2500000 // $25,000.00
@@ -107,7 +110,11 @@ type CreateTransactionInput struct {
 }
 
 func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTransactionInput) (*domain.Transaction, error) {
+	ctx, span := tracer().Start(ctx, "PaymentService.CreateTransaction")
+	defer span.End()
+
 	if err := contextError(ctx); err != nil {
+		recordSpanError(span, err)
 		return nil, err
 	}
 
@@ -115,39 +122,68 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 		"merchant_id", input.MerchantID,
 		"amount_cents", input.AmountCents,
 	)
+	rootCtx := ctx
 
 	if input.IdempotencyKey != "" {
-		existing, err := s.txns.GetByIdempotencyKey(ctx, input.IdempotencyKey)
+		checkCtx, checkSpan := tracer().Start(rootCtx, "PaymentService.CreateTransaction.idempotency_check")
+		existing, err := s.txns.GetByIdempotencyKey(checkCtx, input.IdempotencyKey)
 		if err != nil {
+			recordSpanError(checkSpan, err)
+			checkSpan.End()
+			recordSpanError(span, err)
 			return nil, fmt.Errorf("idempotency check: %w", err)
 		}
+		checkSpan.End()
 		if existing != nil {
 			if !matchesIdempotentRequest(existing, input) {
-				return nil, fmt.Errorf("%w: idempotency key reused with different request", domain.ErrDuplicateTransaction)
+				err := fmt.Errorf("%w: idempotency key reused with different request", domain.ErrDuplicateTransaction)
+				recordSpanError(span, err)
+				return nil, err
 			}
 			log.Info("idempotent request — returning existing transaction", "tx_id", existing.ID)
 			return existing, nil
 		}
 	}
 
-	merchant, err := s.merchants.GetByID(ctx, input.MerchantID)
+	merchantCtx, merchantSpan := tracer().Start(rootCtx, "PaymentService.CreateTransaction.merchant_lookup")
+	merchant, err := s.merchants.GetByID(merchantCtx, input.MerchantID)
 	if err != nil {
+		recordSpanError(merchantSpan, err)
+		merchantSpan.End()
+		recordSpanError(span, err)
 		return nil, err
 	}
+	merchantSpan.End()
 	if !merchant.IsActive() {
+		err := domain.ErrMerchantInactive
+		recordSpanError(span, err)
 		return nil, domain.ErrMerchantInactive
 	}
 
+	_, validationSpan := tracer().Start(rootCtx, "PaymentService.CreateTransaction.validation")
 	if input.AmountCents <= 0 {
+		err := domain.ErrInvalidAmount
+		recordSpanError(validationSpan, err)
+		validationSpan.End()
+		recordSpanError(span, err)
 		return nil, domain.ErrInvalidAmount
 	}
 	if input.AmountCents > s.maxTransactionCents {
+		err := domain.ErrAmountExceedsLimit
+		recordSpanError(validationSpan, err)
+		validationSpan.End()
+		recordSpanError(span, err)
 		return nil, domain.ErrAmountExceedsLimit
 	}
 
 	if input.Currency != "CAD" && input.Currency != "USD" {
+		err := domain.ErrInvalidCurrency
+		recordSpanError(validationSpan, err)
+		validationSpan.End()
+		recordSpanError(span, err)
 		return nil, domain.ErrInvalidCurrency
 	}
+	validationSpan.End()
 
 	now := time.Now()
 	tx := &domain.Transaction{
@@ -163,17 +199,29 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 	}
 
 	if s.db != nil {
-		err = s.createInDBTransaction(ctx, tx)
+		persistCtx, persistSpan := tracer().Start(rootCtx, "PaymentService.CreateTransaction.persist")
+		err = s.createInDBTransaction(persistCtx, tx)
+		if err != nil {
+			recordSpanError(persistSpan, err)
+		}
+		persistSpan.End()
 	} else {
-		err = s.createWithMocks(ctx, tx)
+		persistCtx, persistSpan := tracer().Start(rootCtx, "PaymentService.CreateTransaction.persist")
+		err = s.createWithMocks(persistCtx, tx)
+		if err != nil {
+			recordSpanError(persistSpan, err)
+		}
+		persistSpan.End()
 	}
 	if err != nil {
+		recordSpanError(span, err)
 		return nil, err
 	}
 
 	log.Info("transaction created", "tx_id", tx.ID)
 
-	if err := s.processPayment(ctx, tx, log); err != nil {
+	if err := s.processPayment(rootCtx, tx, log); err != nil {
+		recordSpanError(span, err)
 		return tx, err
 	}
 
@@ -181,6 +229,9 @@ func (s *PaymentService) CreateTransaction(ctx context.Context, input CreateTran
 }
 
 func (s *PaymentService) createInDBTransaction(ctx context.Context, tx *domain.Transaction) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.createInDBTransaction")
+	defer span.End()
+
 	return withTransaction(ctx, s.db, func(dbTx *sql.Tx) error {
 		txnRepo := s.txns.WithTx(dbTx)
 		eventRepo := s.events.WithTx(dbTx)
@@ -222,6 +273,9 @@ func (s *PaymentService) createInDBTransaction(ctx context.Context, tx *domain.T
 }
 
 func (s *PaymentService) createWithMocks(ctx context.Context, tx *domain.Transaction) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.createWithMocks")
+	defer span.End()
+
 	if err := s.txns.Create(ctx, tx); err != nil {
 		return err
 	}
@@ -238,12 +292,18 @@ func (s *PaymentService) createWithMocks(ctx context.Context, tx *domain.Transac
 }
 
 func (s *PaymentService) processPayment(ctx context.Context, tx *domain.Transaction, log *slog.Logger) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.processPayment")
+	defer span.End()
+
 	if err := contextError(ctx); err != nil {
+		recordSpanError(span, err)
 		return err
 	}
 
 	if err := s.transition(ctx, tx, domain.TxStatusProcessing); err != nil {
-		return fmt.Errorf("set processing status: %w", err)
+		err := fmt.Errorf("set processing status: %w", err)
+		recordSpanError(span, err)
+		return err
 	}
 
 	bankCtx, cancel := bankCallContext(ctx, s.bankTimeout)
@@ -253,8 +313,11 @@ func (s *PaymentService) processPayment(ctx context.Context, tx *domain.Transact
 	if err != nil {
 		log.Warn("bank call failed", "tx_id", tx.ID, "error", err)
 		if transitionErr := s.transition(postBankContext(ctx), tx, domain.TxStatusFailed); transitionErr != nil {
-			return errors.Join(err, fmt.Errorf("set failed status: %w", transitionErr))
+			err := errors.Join(err, fmt.Errorf("set failed status: %w", transitionErr))
+			recordSpanError(span, err)
+			return err
 		}
+		recordSpanError(span, err)
 		return err
 	}
 
@@ -262,6 +325,7 @@ func (s *PaymentService) processPayment(ctx context.Context, tx *domain.Transact
 
 	if err := s.completePayment(stateCtx, tx); err != nil {
 		log.Error("failed to finalize completed payment", "tx_id", tx.ID, "error", err)
+		recordSpanError(span, err)
 		return err
 	}
 
@@ -273,21 +337,38 @@ func (s *PaymentService) processPayment(ctx context.Context, tx *domain.Transact
 }
 
 func (s *PaymentService) completePayment(ctx context.Context, tx *domain.Transaction) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.completePayment")
+	defer span.End()
+
 	if s.db != nil {
-		return s.completeInDBTransaction(ctx, tx)
+		err := s.completeInDBTransaction(ctx, tx)
+		if err != nil {
+			recordSpanError(span, err)
+		}
+		return err
 	}
-	return s.completeWithMocks(ctx, tx)
+	err := s.completeWithMocks(ctx, tx)
+	if err != nil {
+		recordSpanError(span, err)
+	}
+	return err
 }
 
 func (s *PaymentService) completeInDBTransaction(ctx context.Context, tx *domain.Transaction) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.completeInDBTransaction")
+	defer span.End()
+
 	if err := contextError(ctx); err != nil {
+		recordSpanError(span, err)
 		return err
 	}
 
 	from := tx.Status
 	to := domain.TxStatusCompleted
 	if !domain.CanTransition(from, to) {
-		return fmt.Errorf("%w: %s → %s", domain.ErrInvalidTransition, from, to)
+		err := fmt.Errorf("%w: %s → %s", domain.ErrInvalidTransition, from, to)
+		recordSpanError(span, err)
+		return err
 	}
 
 	completedAt := time.Now()
@@ -331,6 +412,7 @@ func (s *PaymentService) completeInDBTransaction(ctx context.Context, tx *domain
 		return nil
 	})
 	if err != nil {
+		recordSpanError(span, err)
 		return err
 	}
 
@@ -339,19 +421,28 @@ func (s *PaymentService) completeInDBTransaction(ctx context.Context, tx *domain
 }
 
 func (s *PaymentService) completeWithMocks(ctx context.Context, tx *domain.Transaction) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.completeWithMocks")
+	defer span.End()
+
 	if err := contextError(ctx); err != nil {
+		recordSpanError(span, err)
 		return err
 	}
 
 	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, tx.AmountCents); err != nil {
-		return fmt.Errorf("credit merchant balance: %w", err)
+		err := fmt.Errorf("credit merchant balance: %w", err)
+		recordSpanError(span, err)
+		return err
 	}
 
 	if err := s.transition(ctx, tx, domain.TxStatusCompleted); err != nil {
 		rollbackErr := s.merchants.UpdateBalance(ctx, tx.MerchantID, -tx.AmountCents)
 		if rollbackErr != nil {
-			return errors.Join(err, fmt.Errorf("rollback credited balance: %w", rollbackErr))
+			err := errors.Join(err, fmt.Errorf("rollback credited balance: %w", rollbackErr))
+			recordSpanError(span, err)
+			return err
 		}
+		recordSpanError(span, err)
 		return err
 	}
 
@@ -359,6 +450,9 @@ func (s *PaymentService) completeWithMocks(ctx context.Context, tx *domain.Trans
 }
 
 func (s *PaymentService) callBank(parentCtx, bankCtx context.Context, tx *domain.Transaction) error {
+	parentCtx, span := tracer().Start(parentCtx, "PaymentService.callBank")
+	defer span.End()
+
 	req := BankChargeRequest{
 		TransactionID: tx.ID,
 		MerchantID:    tx.MerchantID,
@@ -373,21 +467,32 @@ func (s *PaymentService) callBank(parentCtx, bankCtx context.Context, tx *domain
 		})
 	})
 
-	return normalizeBankError(parentCtx, bankCtx, err)
+	err = normalizeBankError(parentCtx, bankCtx, err)
+	if err != nil {
+		recordSpanError(span, err)
+	}
+	return err
 }
 
 func (s *PaymentService) RefundTransaction(ctx context.Context, merchantID, txID, reason string) (*domain.Transaction, error) {
+	ctx, span := tracer().Start(ctx, "PaymentService.RefundTransaction")
+	defer span.End()
+
 	if err := contextError(ctx); err != nil {
+		recordSpanError(span, err)
 		return nil, err
 	}
 
 	tx, err := s.ownedTransaction(ctx, merchantID, txID)
 	if err != nil {
+		recordSpanError(span, err)
 		return nil, err
 	}
 
 	if !domain.CanTransition(tx.Status, domain.TxStatusRefunded) {
-		return nil, fmt.Errorf("%w: current status is %s", domain.ErrCannotRefund, tx.Status)
+		err := fmt.Errorf("%w: current status is %s", domain.ErrCannotRefund, tx.Status)
+		recordSpanError(span, err)
+		return nil, err
 	}
 
 	if s.db != nil {
@@ -396,6 +501,7 @@ func (s *PaymentService) RefundTransaction(ctx context.Context, merchantID, txID
 		err = s.refundWithMocks(ctx, tx, reason)
 	}
 	if err != nil {
+		recordSpanError(span, err)
 		return nil, err
 	}
 
@@ -404,6 +510,9 @@ func (s *PaymentService) RefundTransaction(ctx context.Context, merchantID, txID
 }
 
 func (s *PaymentService) refundInDBTransaction(ctx context.Context, tx *domain.Transaction, reason string) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.refundInDBTransaction")
+	defer span.End()
+
 	return withTransaction(ctx, s.db, func(dbTx *sql.Tx) error {
 		txnRepo := s.txns.WithTx(dbTx)
 		merchantRepo := s.merchants.WithTx(dbTx)
@@ -451,11 +560,16 @@ func (s *PaymentService) refundInDBTransaction(ctx context.Context, tx *domain.T
 }
 
 func (s *PaymentService) refundWithMocks(ctx context.Context, tx *domain.Transaction, reason string) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.refundWithMocks")
+	defer span.End()
+
 	if err := s.txns.UpdateStatus(ctx, tx.ID, domain.TxStatusRefunded); err != nil {
+		recordSpanError(span, err)
 		return err
 	}
 	tx.Status = domain.TxStatusRefunded
 	if err := s.merchants.UpdateBalance(ctx, tx.MerchantID, -tx.AmountCents); err != nil {
+		recordSpanError(span, err)
 		return err
 	}
 	payload, err := marshalOutboxPayload(map[string]string{"reason": reason})
@@ -470,6 +584,7 @@ func (s *PaymentService) refundWithMocks(ctx context.Context, tx *domain.Transac
 		Payload:       payload,
 		CreatedAt:     time.Now(),
 	}); err != nil {
+		recordSpanError(span, err)
 		return err
 	}
 
@@ -479,46 +594,88 @@ func (s *PaymentService) refundWithMocks(ctx context.Context, tx *domain.Transac
 }
 
 func (s *PaymentService) GetTransaction(ctx context.Context, merchantID, id string) (*domain.Transaction, error) {
-	return s.ownedTransaction(ctx, merchantID, id)
+	ctx, span := tracer().Start(ctx, "PaymentService.GetTransaction")
+	defer span.End()
+
+	tx, err := s.ownedTransaction(ctx, merchantID, id)
+	if err != nil {
+		recordSpanError(span, err)
+	}
+	return tx, err
 }
 
 func (s *PaymentService) GetMerchantBalance(ctx context.Context, merchantID string) (*domain.Merchant, error) {
-	return s.merchants.GetByID(ctx, merchantID)
+	ctx, span := tracer().Start(ctx, "PaymentService.GetMerchantBalance")
+	defer span.End()
+
+	merchant, err := s.merchants.GetByID(ctx, merchantID)
+	if err != nil {
+		recordSpanError(span, err)
+	}
+	return merchant, err
 }
 
 func (s *PaymentService) ListTransactions(ctx context.Context, merchantID string, params domain.ListParams) ([]*domain.Transaction, int, error) {
-	return s.txns.ListByMerchant(ctx, merchantID, params)
+	ctx, span := tracer().Start(ctx, "PaymentService.ListTransactions")
+	defer span.End()
+
+	txns, total, err := s.txns.ListByMerchant(ctx, merchantID, params)
+	if err != nil {
+		recordSpanError(span, err)
+	}
+	return txns, total, err
 }
 
 func (s *PaymentService) GetTransactionHistory(ctx context.Context, merchantID, txID string) ([]*domain.TransactionEvent, error) {
+	ctx, span := tracer().Start(ctx, "PaymentService.GetTransactionHistory")
+	defer span.End()
+
 	if _, err := s.ownedTransaction(ctx, merchantID, txID); err != nil {
+		recordSpanError(span, err)
 		return nil, err
 	}
-	return s.events.ListByTransaction(ctx, txID)
+	events, err := s.events.ListByTransaction(ctx, txID)
+	if err != nil {
+		recordSpanError(span, err)
+	}
+	return events, err
 }
 
 func (s *PaymentService) ownedTransaction(ctx context.Context, merchantID, txID string) (*domain.Transaction, error) {
+	ctx, span := tracer().Start(ctx, "PaymentService.ownedTransaction")
+	defer span.End()
+
 	tx, err := s.txns.GetByID(ctx, txID)
 	if err != nil {
+		recordSpanError(span, err)
 		return nil, err
 	}
 	if tx.MerchantID != merchantID {
-		return nil, domain.ErrTransactionNotFound
+		err := domain.ErrTransactionNotFound
+		recordSpanError(span, err)
+		return nil, err
 	}
 	return tx, nil
 }
 
 func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction, to domain.TransactionStatus) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.transition")
+	defer span.End()
+
 	if err := contextError(ctx); err != nil {
+		recordSpanError(span, err)
 		return err
 	}
 
 	from := tx.Status
 	if !domain.CanTransition(from, to) {
-		return fmt.Errorf("%w: %s → %s", domain.ErrInvalidTransition, from, to)
+		err := fmt.Errorf("%w: %s → %s", domain.ErrInvalidTransition, from, to)
+		recordSpanError(span, err)
+		return err
 	}
 
 	if err := s.txns.UpdateStatus(ctx, tx.ID, to); err != nil {
+		recordSpanError(span, err)
 		return err
 	}
 
@@ -532,11 +689,15 @@ func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction,
 		ToStatus:      string(to),
 		CreatedAt:     time.Now(),
 	}); err != nil {
-		return s.rollbackTransition(ctx, tx, from, fmt.Errorf("record transition event: %w", err))
+		err := s.rollbackTransition(ctx, tx, from, fmt.Errorf("record transition event: %w", err))
+		recordSpanError(span, err)
+		return err
 	}
 
 	if err := s.emitTransitionOutboxEvent(ctx, &transitionedTx, to); err != nil {
-		return s.rollbackTransition(ctx, tx, from, fmt.Errorf("record transition outbox event: %w", err))
+		err := s.rollbackTransition(ctx, tx, from, fmt.Errorf("record transition outbox event: %w", err))
+		recordSpanError(span, err)
+		return err
 	}
 
 	tx.Status = to
@@ -544,10 +705,16 @@ func (s *PaymentService) transition(ctx context.Context, tx *domain.Transaction,
 }
 
 func (s *PaymentService) rollbackTransition(ctx context.Context, tx *domain.Transaction, from domain.TransactionStatus, cause error) error {
+	ctx, span := tracer().Start(ctx, "PaymentService.rollbackTransition")
+	defer span.End()
+
 	if rollbackErr := s.txns.UpdateStatus(ctx, tx.ID, from); rollbackErr != nil {
-		return errors.Join(cause, fmt.Errorf("rollback status to %s: %w", from, rollbackErr))
+		err := errors.Join(cause, fmt.Errorf("rollback status to %s: %w", from, rollbackErr))
+		recordSpanError(span, err)
+		return err
 	}
 	tx.Status = from
+	recordSpanError(span, cause)
 	return cause
 }
 
@@ -680,4 +847,16 @@ func marshalOutboxPayload(payload interface{}) (json.RawMessage, error) {
 
 func centsToDecimalString(cents int64) string {
 	return fmt.Sprintf("%.2f", float64(cents)/100)
+}
+
+func tracer() oteltrace.Tracer {
+	return otel.Tracer("github.com/aszender/payflow/internal/service")
+}
+
+func recordSpanError(span oteltrace.Span, err error) {
+	if span == nil || err == nil {
+		return
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
 }

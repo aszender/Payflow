@@ -14,6 +14,12 @@ type Config struct {
 	Environment string
 	LogLevel    string
 
+	// Tracing
+	TracingEnabled      bool
+	TracingServiceName  string
+	TracingOTLPEndpoint string
+	TracingOTLPInsecure bool
+
 	// Database
 	DatabaseURL    string
 	DBMaxOpenConns int
@@ -56,6 +62,11 @@ func Load() (*Config, error) {
 		Port:        port,
 		Environment: getEnv("ENVIRONMENT", "development"),
 		LogLevel:    getEnv("LOG_LEVEL", "info"),
+
+		TracingEnabled:      getEnv("TRACING_ENABLED", "false") == "true",
+		TracingServiceName:  getEnv("OTEL_SERVICE_NAME", "payflow"),
+		TracingOTLPEndpoint: getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+		TracingOTLPInsecure: getEnv("OTEL_EXPORTER_OTLP_INSECURE", "false") == "true",
 
 		DatabaseURL:    getEnv("DATABASE_URL", "postgres://payflow:payflow_secret@localhost:5432/payflow?sslmode=disable"),
 		DBMaxOpenConns: getEnvInt("DB_MAX_OPEN_CONNS", 25),

@@ -12,6 +12,8 @@ Designed to demonstrate production-oriented backend architecture: clean layering
 - Idempotent payment processing (app + DB UNIQUE constraint)
 - State machine with full audit trail
 - Structured logging + p50/p95/p99 metrics
+- Prometheus metrics endpoint (runtime + application metrics)
+- OpenTelemetry distributed tracing (OTLP export)
 - Dockerized deployment
 
 ## Architecture
@@ -82,7 +84,9 @@ Designed to demonstrate production-oriented backend architecture: clean layering
 
 **Observability**
 - Structured JSON logging (slog) with request ID correlation
-- p50/p95/p99 latency histograms per endpoint
+- p50/p95/p99 latency histograms per endpoint (in-memory, custom metrics struct)
+- Prometheus metrics at `GET /metrics` via `promhttp.Handler()` — exposes Go runtime metrics (GC, goroutines, memory, CPU) in Prometheus text format, ready for scraping
+- OpenTelemetry distributed tracing — OTLP HTTP export to any compatible backend (Jaeger, Grafana Tempo); enabled via environment variables
 - Health check endpoint for K8s liveness/readiness probes
 - Request count + active request gauges
 
@@ -106,9 +110,7 @@ Rate limiting fails open to preserve availability. Idempotency uses TTLs and saf
 
 ## Tech Stack
 
-Go 1.25 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · Kubernetes manifests for a full local stack
-
-Application metrics exposed via `/metrics` endpoint
+Go 1.25 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · Kubernetes manifests for a full local stack · Prometheus · OpenTelemetry
 
 ## Quick Start
 
@@ -262,9 +264,33 @@ The example file includes:
 
 ## Metrics
 
-The API exposes a `GET /metrics` endpoint for Prometheus scraping. It uses the default Prometheus collector set and does not require custom application metrics to be enabled.
+PayFlow exposes two layers of metrics:
 
-This endpoint is intended for operational visibility during local development and production-style deployments.
+**Prometheus — `GET /metrics`**
+Served by `promhttp.Handler()` from `github.com/prometheus/client_golang`. Returns Go runtime metrics in Prometheus text format, ready for scraping:
+- `go_goroutines` — current goroutine count
+- `go_gc_duration_seconds` — GC pause durations
+- `go_memstats_alloc_bytes` — heap in use
+- `process_cpu_seconds_total` — CPU time consumed
+- `process_open_fds` — open file descriptors
+
+No configuration required. Point a Prometheus server at `http://<host>:8080/metrics` and the metrics appear automatically.
+
+**Application metrics (in-memory)**
+A custom `internal/metrics/metrics.go` struct tracks request counts by method/path/status, p50/p95/p99 latency per endpoint, active in-flight requests, and transaction counts by outcome. Populated by `MetricsMiddleware` applied globally to all routes.
+
+## Tracing
+
+Distributed tracing is implemented via OpenTelemetry (`internal/telemetry/tracing.go`). Traces are exported over OTLP HTTP to any compatible backend. Enabled through environment variables:
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `TRACING_ENABLED` | Toggle tracing on/off | `true` |
+| `OTEL_SERVICE_NAME` | Service name in traces | `payflow` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Backend URL | `http://jaeger:4318` |
+| `OTEL_EXPORTER_OTLP_INSECURE` | Skip TLS verification | `true` |
+
+When disabled (default), the tracer is a no-op and adds zero overhead.
 
 ## Readiness
 
@@ -319,6 +345,8 @@ payflow/
 │   │   └── idempotency_check.lua     ← atomic idempotency check script
 │   ├── metrics/
 │   │   └── metrics.go                ← counters, histograms, gauges
+│   ├── telemetry/
+│   │   └── tracing.go                ← OpenTelemetry setup, OTLP HTTP export
 │   ├── config/
 │   │   └── config.go                 ← env-based configuration
 │   └── concurrency/
@@ -394,7 +422,7 @@ Things this project demonstrates vs. what a production system would add:
 |-------------|------------|
 | Simulated bank client by default | Real bank partner API integration |
 | Redis-backed global rate limiter | More granular route- and merchant-level policies |
-| slog JSON logging | OpenTelemetry + Datadog/CloudWatch |
+| slog JSON logging + Prometheus metrics + OTel tracing | Add Grafana dashboards, Alertmanager rules, Datadog/CloudWatch export |
 | Single PostgreSQL | Primary + read replicas + PgBouncer |
 | Basic API key auth | OAuth2 + mTLS + PCI DSS compliance |
 | Manual SQL migrations executed at startup | golang-migrate or Atlas |
