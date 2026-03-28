@@ -108,29 +108,35 @@ Rate limiting fails open to preserve availability. Idempotency uses TTLs and saf
 
 ## Tech Stack
 
-Go 1.25 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · Kubernetes manifests for a full local stack · Prometheus · OpenTelemetry
+Go 1.25 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · Kubernetes · Prometheus · Grafana · Jaeger · OpenTelemetry
 
 ## Quick Start
 
 ```bash
-# Clone and start
 git clone https://github.com/aszender/payflow.git
 cd payflow
 docker-compose up -d --build
+```
 
-# Verify
-curl http://localhost:8080/health | jq
+The full stack starts automatically:
 
-# Create a payment
+| Service | URL | Credentials |
+|---------|-----|-------------|
+| PayFlow API | http://localhost:8080 | Bearer token (see below) |
+| Grafana | http://localhost:3000 | admin / admin |
+| Prometheus | http://localhost:9090 | — |
+| Jaeger UI | http://localhost:16686 | — |
+
+```bash
+# Send a payment (generates metrics and traces)
 curl -X POST http://localhost:8080/api/v1/transactions \
   -H "Authorization: Bearer sk_live_maple_001" \
   -H "Content-Type: application/json" \
   -H "X-Idempotency-Key: order_12345" \
   -d '{"amount_cents":15000,"currency":"CAD"}'
 
-# Check merchant balance
-curl http://localhost:8080/api/v1/merchants/m_001/balance \
-  -H "Authorization: Bearer sk_live_maple_001" | jq
+# Open Grafana → PayFlow dashboard → see request rate, p99 latency, error rate live
+# Open Jaeger → search service "payflow" → see the full trace for that request
 ```
 
 ## Kubernetes
@@ -222,32 +228,51 @@ The example file includes:
 - `DB_NAME`
 - `PORT`
 
-## Metrics
+## Observability Stack
 
-`GET /metrics` is served by `promhttp.Handler()` and exposes everything in Prometheus text format — no extra configuration required.
+`docker-compose up` starts the full observability stack alongside the application.
 
-**Application metrics** (registered via `promauto` in `internal/metrics/metrics.go`):
-- `http_requests_total` — counter by method, path, status code
-- `http_request_duration_seconds` — histogram with fixed buckets; query p99 via `histogram_quantile(0.99, rate(...))`
-- `http_active_requests` — gauge of in-flight requests
+### Grafana — http://localhost:3000 (admin / admin)
 
-**Go runtime metrics** (auto-registered by the client library):
-- `go_goroutines`, `go_gc_duration_seconds`, `go_memstats_alloc_bytes`, `process_cpu_seconds_total`, and more
+Pre-built PayFlow dashboard (`observability/grafana/dashboards/payflow.json`) loads automatically:
 
-To store and visualize: point a Prometheus server at `http://<host>:8080/metrics`. To query, use PromQL. To alert, use Alertmanager. None of these are required to run the app — `curl /metrics` works standalone.
+- **Top row:** request rate, error rate, p99 latency, active requests — all live with color thresholds (green/yellow/red)
+- **Request rate by endpoint** — time series broken down by method + path
+- **Latency percentiles** — p50 / p95 / p99 on one graph
+- **HTTP responses by status code** — 2xx green, 4xx yellow, 5xx red
+- **p99 latency per endpoint** — spot which route is slow
+- **Go runtime:** goroutines, heap memory, GC pause p99
 
-## Tracing
+### Prometheus — http://localhost:9090
 
-Distributed tracing is implemented via OpenTelemetry (`internal/telemetry/tracing.go`). Traces are exported over OTLP HTTP to any compatible backend. Enabled through environment variables:
+Scrapes `app:8080/metrics` every 15 seconds. Application metrics:
+- `http_requests_total{method, path, status}` — counter
+- `http_request_duration_seconds{method, path}` — histogram (fixed buckets)
+- `http_active_requests` — gauge
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `TRACING_ENABLED` | Toggle tracing on/off | `true` |
-| `OTEL_SERVICE_NAME` | Service name in traces | `payflow` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Backend URL | `http://jaeger:4318` |
-| `OTEL_EXPORTER_OTLP_INSECURE` | Skip TLS verification | `true` |
+Useful PromQL queries:
+```promql
+# p99 latency for POST /api/v1/transactions
+histogram_quantile(0.99, rate(http_request_duration_seconds_bucket{path="/api/v1/transactions"}[5m]))
 
-When disabled (default), the tracer is a no-op and adds zero overhead.
+# error rate
+sum(rate(http_requests_total{status=~"5.."}[1m])) / sum(rate(http_requests_total[1m]))
+
+# requests per second by endpoint
+sum by (method, path) (rate(http_requests_total[1m]))
+```
+
+### Jaeger — http://localhost:16686
+
+Receives OTel traces from PayFlow over OTLP HTTP. Search by service `payflow` to see
+the full request waterfall: middleware → service → database. Tracing is enabled
+automatically in docker-compose via:
+```
+TRACING_ENABLED: "true"
+OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+```
+
+When running without docker-compose, tracing is off by default (`TRACING_ENABLED` unset) — zero overhead.
 
 ## Readiness
 
@@ -309,9 +334,15 @@ payflow/
 │   └── concurrency/
 │       ├── patterns.go               ← worker pool, verification pipeline
 │       └── patterns_test.go          ← concurrency tests with -race
+├── observability/
+│   ├── prometheus.yml                ← scrape config targeting app:8080/metrics
+│   └── grafana/
+│       ├── provisioning/             ← auto-loads datasource + dashboard on startup
+│       └── dashboards/
+│           └── payflow.json          ← pre-built dashboard (latency, errors, runtime)
 ├── migrations/                       ← 6 manual SQL migration files (idempotent, ordered)
 ├── Dockerfile                        ← multi-stage container build
-├── docker-compose.yml                ← PostgreSQL + Kafka (KRaft) + Redis
+├── docker-compose.yml                ← PostgreSQL + Kafka + Redis + Prometheus + Grafana + Jaeger
 ├── Makefile
 └── go.mod
 ```

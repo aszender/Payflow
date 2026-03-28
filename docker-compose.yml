@@ -11,6 +11,10 @@ services:
       KAFKA_ENABLED: "true"
       KAFKA_BROKERS: kafka:9092
       KAFKA_TOPIC: payment-events
+      TRACING_ENABLED: "true"
+      OTEL_SERVICE_NAME: payflow
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      OTEL_EXPORTER_OTLP_INSECURE: "true"
     ports:
       - "8080:8080"
     depends_on:
@@ -21,6 +25,7 @@ services:
       kafka:
         condition: service_started
     restart: unless-stopped
+
   db:
     image: postgres:16-alpine
     environment:
@@ -36,6 +41,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
   redis:
     image: redis:7-alpine
     ports:
@@ -45,6 +51,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
   kafka:
     image: confluentinc/cp-kafka:7.6.1
     hostname: kafka
@@ -65,5 +72,47 @@ services:
     ports:
       - "9092:9092"
 
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - promdata:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    depends_on:
+      - app
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.58
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "4318:4318"     # OTLP HTTP receiver
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  promdata:
+  grafanadata:
