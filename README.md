@@ -106,7 +106,7 @@ Rate limiting fails open to preserve availability. Idempotency uses TTLs and saf
 
 ## Tech Stack
 
-Go 1.25 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · basic Kubernetes manifests
+Go 1.25 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · Kubernetes manifests for a full local stack
 
 Application metrics exposed via `/metrics` endpoint
 
@@ -132,6 +132,32 @@ curl -X POST http://localhost:8080/api/v1/transactions \
 curl http://localhost:8080/api/v1/merchants/m_001/balance \
   -H "Authorization: Bearer sk_live_maple_001" | jq
 ```
+
+## Kubernetes
+
+The repository includes a runnable Kubernetes stack under `deployments/k8s` for a local or single-node cluster. It deploys the application plus PostgreSQL, Redis, Kafka in KRaft mode, persistent volumes for PostgreSQL and Kafka, and a bootstrap `Job` that creates the `payment-events` topic.
+
+High-level flow:
+
+```bash
+# Build the application image
+docker build -t payflow:latest .
+
+# If your cluster does not share the host Docker daemon, load or push the image
+# Example for kind:
+kind load docker-image payflow:latest --name <your-cluster-name>
+
+# Apply the stack
+kubectl apply -k deployments/k8s
+
+# Wait for workloads
+kubectl -n payflow get pods
+
+# Access the API locally
+kubectl -n payflow port-forward svc/payflow 8080:80
+```
+
+See `deployments/k8s/README.md` for the full deployment notes.
 
 ## API
 
@@ -300,7 +326,7 @@ payflow/
 │       └── patterns_test.go          ← concurrency tests with -race
 ├── migrations/                       ← 6 manual SQL migration files (idempotent, ordered)
 ├── Dockerfile                        ← multi-stage container build
-├── docker-compose.yml                ← PostgreSQL + Kafka + Zookeeper + Redis
+├── docker-compose.yml                ← PostgreSQL + Kafka (KRaft) + Redis
 ├── Makefile
 └── go.mod
 ```

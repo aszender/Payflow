@@ -1,0 +1,24 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-bootstrap-topics
+spec:
+  backoffLimit: 12
+  template:
+    metadata:
+      labels:
+        job: kafka-bootstrap-topics
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-topic-init
+          image: confluentinc/cp-kafka:7.6.1
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              until kafka-topics --bootstrap-server kafka:9092 --list >/dev/null 2>&1; do
+                echo "waiting for kafka"
+                sleep 5
+              done
+              kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic payment-events --partitions 1 --replication-factor 1

@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: payflow-config
+data:
+  PORT: "8080"
+  ENVIRONMENT: production
+  LOG_LEVEL: info
+  REDIS_ADDR: redis:6379
+  REDIS_DB: "0"
+  KAFKA_ENABLED: "true"
+  KAFKA_BROKERS: kafka:9092
+  KAFKA_TOPIC: payment-events
+  RATE_LIMIT_RPS: "10"
+  RATE_LIMIT_BURST: "20"
