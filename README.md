@@ -108,7 +108,7 @@ Rate limiting fails open to preserve availability. Idempotency uses TTLs and saf
 
 ## Tech Stack
 
-Go 1.25 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · Kubernetes · Prometheus · Grafana · Jaeger · OpenTelemetry
+Go 1.26.3 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · Kubernetes · Prometheus · Grafana · Jaeger · OpenTelemetry
 
 ## Quick Start
 
