@@ -18,50 +18,61 @@ Designed to demonstrate production-oriented backend architecture: clean layering
 
 ## Architecture
 
-```text
-                         ┌─────────────────────────┐
-                         │      Load Balancer       │
-                         └────────────┬────────────┘
-                                      │
-              ┌───────────────────────┬┴┬───────────────────────┐
-              │                       │ │                       │
-     ┌────────▼────────┐    ┌────────▼─▼──────┐    ┌──────────▼────────┐
-     │   PayFlow API   │    │   PayFlow API   │    │   PayFlow API     │
-     │   (stateless)   │    │   (stateless)   │    │   (stateless)     │
-     └────────┬────────┘    └────────┬────────┘    └──────────┬────────┘
-              │                      │                        │
-              └──────────────────────┼────────────────────────┘
-                                     │
-                    ┌────────────────┬┴┬────────────────┐
-                    │                │ │                │
-           ┌───────▼──────┐  ┌──────▼─▼─────┐  ┌──────▼──────┐
-           │  PostgreSQL   │  │    Kafka      │  │   Redis     │
-           │  (primary)    │  │  (events)     │  │ (rate limit │
-           │               │  │               │  │  / cache)*  │
-           └──────────────┘  └──────┬────────┘  └─────────────┘
-                                    │
-                    ┌───────────────┬┴┬───────────────┐
-                    │               │ │               │
-             ┌──────▼─────┐ ┌──────▼─▼────┐ ┌───────▼──────┐
-             │  Webhook    │ │   Audit     │ │  Analytics   │
-             │  Service    │ │   Logger    │ │  Pipeline    │
-             └────────────┘ └─────────────┘ └──────────────┘
+```mermaid
+flowchart TD
+    LB["Load Balancer"]
 
-* Redis, webhooks, and analytics are shown for production reference. This repository implements the API, PostgreSQL persistence, Kafka-backed outbox flow, and Redis-backed rate limiting/idempotency coordination.
+    subgraph API["PayFlow API (stateless replicas)"]
+        API1["Instance 1"]
+        API2["Instance 2"]
+        API3["Instance 3"]
+    end
+
+    PG[("PostgreSQL<br/>primary")]
+    KAFKA[("Kafka<br/>events")]
+    REDIS[("Redis*<br/>rate limit / idempotency")]
+
+    WEBHOOK["Webhook Service*"]
+    AUDIT["Audit Logger*"]
+    ANALYTICS["Analytics Pipeline*"]
+
+    LB --> API1 & API2 & API3
+    API1 & API2 & API3 --> PG
+    API1 & API2 & API3 --> KAFKA
+    API1 & API2 & API3 --> REDIS
+    KAFKA --> WEBHOOK & AUDIT & ANALYTICS
 ```
+
+\* Redis, webhooks, and analytics are shown for production reference. This repository implements the API, PostgreSQL persistence, Kafka-backed outbox flow, and Redis-backed rate limiting/idempotency coordination.
 
 ## Payment Flow
 
-```text
-1. Client sends POST /transactions with idempotency key
-2. API checks idempotency → if duplicate, return cached result
-3. Validate merchant (active?) and amount (positive? under limit?)
-4. DB TRANSACTION: save payment + audit event + outbox event → COMMIT
-5. Call bank client with timeout (circuit breaker protected, retry on transient failures)
-6. Bank approves → status COMPLETED → credit merchant balance
-7. Bank fails → status FAILED → no balance change
-8. Outbox worker publishes event to Kafka (async)
-9. Downstream services receive notification (webhooks, analytics)
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as PayFlow API
+    participant DB as PostgreSQL
+    participant Bank
+    participant Kafka
+    participant Downstream as Webhooks / Analytics
+
+    Client->>API: POST /transactions (Idempotency-Key)
+    API->>API: Check idempotency (duplicate? return cached result)
+    API->>API: Validate merchant + amount
+    API->>DB: BEGIN — payment + audit event + outbox event
+    DB-->>API: COMMIT
+    API->>Bank: Charge (circuit breaker + retry w/ backoff)
+    alt Approved
+        Bank-->>API: Approved
+        API->>DB: status = COMPLETED, credit balance
+    else Declined / failure
+        Bank-->>API: Declined
+        API->>DB: status = FAILED
+    end
+    API-->>Client: Response
+    Note over API,Kafka: Async, decoupled from request path
+    API->>Kafka: Outbox worker publishes event
+    Kafka->>Downstream: Notify (webhooks, analytics)
 ```
 
 ## Core Features
@@ -108,7 +119,7 @@ Rate limiting fails open to preserve availability. Idempotency uses TTLs and saf
 
 ## Tech Stack
 
-Go 1.26.3 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · Kubernetes · Prometheus · Grafana · Jaeger · OpenTelemetry
+Go 1.26.5 · chi · PostgreSQL 16 · Redis 7 · Kafka · Docker · Kubernetes · Prometheus · Grafana · Jaeger · OpenTelemetry
 
 ## Quick Start
 
