@@ -421,7 +421,7 @@ Things this project demonstrates vs. what a production system would add:
 |-------------|------------|
 | Simulated bank client by default | Real bank partner API integration |
 | Redis-backed global rate limiter | More granular route- and merchant-level policies |
-| slog JSON logging + Prometheus metrics + OTel tracing | Add Grafana dashboards, Alertmanager rules, Datadog/CloudWatch export |
+| JSON logging, Prometheus metrics, preconfigured Grafana dashboard, and OpenTelemetry tracing | Add Alertmanager rules and Datadog/CloudWatch export |
 | Single PostgreSQL | Primary + read replicas + PgBouncer |
 | Basic API key auth | OAuth2 + mTLS + PCI DSS compliance |
 | Manual SQL migrations executed at startup | golang-migrate or Atlas |
